@@ -19,6 +19,7 @@ import {
   CANONICAL_FIXTURE_ROOT,
   LOCK_FILENAME,
   buildDeterministicYrc,
+  buildPcmWav,
   sha256,
 } from './fixture-spec.mjs'
 import { generateFixtures } from './fixture-generator.mjs'
@@ -26,6 +27,9 @@ import {
   validateFixtureLock,
   verifyDeterministicYrc,
   verifyFixtureSet,
+  AFCONVERT_EXECUTABLE,
+  AFINFO_EXECUTABLE,
+  inspectAudioFile,
 } from './fixture-verifier.mjs'
 
 const temporaryDirectories = []
@@ -159,6 +163,47 @@ test('fake header bytes cannot pass real audio verification even when lock hashe
     () => verifyFixtureSet({ directory }),
     /afinfo could not identify|afinfo did not report|unexpected mp3/i,
   )
+})
+
+test('audio inspection invokes fixed tools with shell disabled and a controlled environment', async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), 'clarus-audio-inspect-test-'))
+  t.after(() => rm(temporary, { recursive: true, force: true }))
+  const inputPath = join(temporary, 'fixture.mp3')
+  await writeFile(inputPath, Buffer.from('fixture'))
+  const decoded = buildPcmWav({
+    channels: 2,
+    durationSeconds: 1,
+    expectedSeekMarkersSeconds: [],
+    sampleRateHz: 44100,
+  })
+  const calls = []
+  const inspected = await inspectAudioFile({
+    channels: 2,
+    codec: 'mp3',
+    filePath: inputPath,
+    sampleRateHz: 44100,
+    run: async (executable, argv, options) => {
+      calls.push({ executable, argv, options })
+      if (executable === AFINFO_EXECUTABLE) {
+        return {
+          stdout: 'File type ID: mpg3\nData format: 2 ch, 44100 Hz\nestimated duration: 1 sec\n',
+          stderr: '',
+        }
+      }
+      assert.equal(executable, AFCONVERT_EXECUTABLE)
+      await writeFile(argv.at(-1), decoded)
+      return { stdout: '', stderr: '' }
+    },
+  })
+  assert.equal(inspected.channels, 2)
+  assert.deepEqual(calls.map(({ executable, argv }) => [executable, argv]), [
+    [AFINFO_EXECUTABLE, [inputPath]],
+    [AFCONVERT_EXECUTABLE, ['-f', 'WAVE', '-d', 'LEI16@44100', inputPath, calls[1]?.argv.at(-1)]],
+  ])
+  for (const call of calls) {
+    assert.equal(call.options.shell, false)
+    assert.deepEqual(call.options.env, { LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin' })
+  }
 })
 
 test('lock, fixture, and fixture-directory symlinks are rejected without following them', async () => {

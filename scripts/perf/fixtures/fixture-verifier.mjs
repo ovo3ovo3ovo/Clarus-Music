@@ -24,6 +24,7 @@ export const AFCONVERT_EXECUTABLE = '/usr/bin/afconvert'
 export const AFINFO_EXECUTABLE = '/usr/bin/afinfo'
 export const MP3_ENCODER_SETTINGS = Object.freeze(['--cbr', '-b', '128', '--noreplaygain'])
 export const FLAC_ENCODER_SETTINGS = Object.freeze(['-f', 'flac', '-d', 'flac'])
+export const FIXED_AUDIO_ENVIRONMENT = Object.freeze({ LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin' })
 export const SEEK_MARKER_FREQUENCY_HZ = 1760
 export const SEEK_MARKER_WINDOW_SECONDS = 0.2
 export const SEEK_MARKER_MINIMUM_DB = 10
@@ -44,10 +45,22 @@ function errorDetails(error) {
   return `${stderr}\n${message}`.trim().replace(/(?:[A-Za-z]:)?\/[^\s'"]+/g, '[path]')
 }
 
-async function runProcess(executable, argumentsList, { timeout = 120000 } = {}) {
+async function runProcess(
+  executable,
+  argumentsList,
+  { timeout = 120000 } = {},
+) {
+  if (executable !== AFINFO_EXECUTABLE && executable !== AFCONVERT_EXECUTABLE) {
+    throw new Error(`Fixture verification refuses non-fixed audio tool ${executable}`)
+  }
+  if (!Array.isArray(argumentsList) || argumentsList.some((argument) => typeof argument !== 'string')) {
+    throw new Error('Fixture verification audio tool argv must be a string array')
+  }
   return execFileAsync(executable, argumentsList, {
     maxBuffer: 1024 * 1024,
     timeout,
+    shell: false,
+    env: { ...FIXED_AUDIO_ENVIRONMENT },
   })
 }
 
@@ -225,7 +238,7 @@ async function decodeAudioToPcm(filePath, { run = runProcess } = {}) {
       await run(
         AFCONVERT_EXECUTABLE,
         ['-f', 'WAVE', '-d', `LEI16@${AUDIO_SAMPLE_RATE_HZ}`, filePath, decodedPath],
-        { timeout: 120000 },
+        { timeout: 120000, shell: false, env: FIXED_AUDIO_ENVIRONMENT },
       )
     } catch (error) {
       throw new Error(`afconvert could not decode fixture audio: ${errorDetails(error)}`, {
@@ -254,7 +267,11 @@ export async function inspectAudioFile({
 
   let afinfo
   try {
-    afinfo = await run(AFINFO_EXECUTABLE, [filePath], { timeout: 30000 })
+    afinfo = await run(AFINFO_EXECUTABLE, [filePath], {
+      timeout: 30000,
+      shell: false,
+      env: FIXED_AUDIO_ENVIRONMENT,
+    })
   } catch (error) {
     throw new Error(`afinfo could not identify fixture audio: ${errorDetails(error)}`, {
       cause: error,
