@@ -747,6 +747,43 @@ test('fixture bytes changed and restored during top still make the run unusable'
   assert.equal(emitted.failure.code, 'FIXTURE_DRIFT')
 })
 
+test('fixture bytes changed and restored during final verification make the run unusable', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  const fixturePath = join(
+    harness.repositoryRoot,
+    'artifacts',
+    'perf',
+    'fixtures',
+    'current',
+    'tone-short-mp3.mp3',
+  )
+  const originalBytes = await readFile(fixturePath)
+  const verifier = harness.dependencies.fixtureVerifier
+  let verifierCalls = 0
+  harness.dependencies.fixtureVerifier = async (argumentsValue) => {
+    verifierCalls += 1
+    const result = await verifier(argumentsValue)
+    if (verifierCalls === 3) {
+      await writeFile(fixturePath, Buffer.from('x'))
+      await writeFile(fixturePath, originalBytes)
+    }
+    return result
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(verifierCalls, 3)
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.report.failure.code, 'FIXTURE_DRIFT')
+  assert.equal(result.report.usable, false)
+  assert.equal(harness.fixtureCloses(), 3)
+  const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
+  assert.equal(emitted.status, 'failed')
+  assert.equal(emitted.usable, false)
+  assert.doesNotThrow(() => validateRunReport(emitted))
+})
+
 test('a signal after before-numeric attribution stops pre-top fixture work from being scheduled', async (t) => {
   const harness = await createHarness()
   t.after(() => rm(harness.temporary, { recursive: true, force: true }))
@@ -770,6 +807,33 @@ test('a signal after before-numeric attribution stops pre-top fixture work from 
   )
 })
 
+test('a fixture verifier run after SIGTERM never spawns another fixture tool child', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  const originalVerifier = harness.dependencies.fixtureVerifier
+  const child = fakeToolChild()
+  let spawnCount = 0
+  harness.dependencies.spawnProcess = () => {
+    spawnCount += 1
+    return child
+  }
+  harness.dependencies.fixtureVerifier = async (argumentsValue) => {
+    const verified = await originalVerifier(argumentsValue)
+    harness.signalSource.emit('SIGTERM')
+    await assert.rejects(
+      argumentsValue.run(AFINFO_EXECUTABLE, ['/tmp/fixture.mp3'], { timeout: 1000 }),
+      /interrupted|signal/i,
+    )
+    return verified
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.status, 'interrupted')
+  assert.equal(spawnCount, 0)
+})
+
 test('a signal during required tool availability stops fixture verification from being scheduled', async (t) => {
   const harness = await createHarness()
   t.after(() => rm(harness.temporary, { recursive: true, force: true }))
@@ -783,6 +847,68 @@ test('a signal during required tool availability stops fixture verification from
   assert.equal(result.exitCode, 143)
   assert.equal(result.report.status, 'interrupted')
   assert.equal(harness.fixtureCalls(), 0)
+})
+
+test('SIGTERM after readHost prevents readGit from being scheduled', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let gitCalls = 0
+  const host = harness.dependencies.readHost
+  harness.dependencies.readHost = async () => {
+    const result = await host()
+    harness.signalSource.emit('SIGTERM')
+    return result
+  }
+  harness.dependencies.readGit = async () => {
+    gitCalls += 1
+    return { commit: COMMIT, dirty: false }
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 143)
+  assert.equal(gitCalls, 0)
+})
+
+test('SIGTERM after readGit prevents captureAttribution from being scheduled', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let attributionCalls = 0
+  harness.dependencies.readGit = async () => {
+    harness.signalSource.emit('SIGTERM')
+    return { commit: COMMIT, dirty: false }
+  }
+  harness.dependencies.captureAttribution = async () => {
+    attributionCalls += 1
+    return attribution()
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 143)
+  assert.equal(attributionCalls, 0)
+})
+
+test('SIGTERM after initial captureAttribution prevents revalidation from being scheduled', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let captureCalls = 0
+  let revalidationCalls = 0
+  harness.dependencies.captureAttribution = async () => {
+    captureCalls += 1
+    harness.signalSource.emit('SIGTERM')
+    return attribution()
+  }
+  harness.dependencies.revalidateAttribution = async ({ baseline }) => {
+    revalidationCalls += 1
+    return baseline
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 143)
+  assert.equal(captureCalls, 1)
+  assert.equal(revalidationCalls, 0)
 })
 
 test('a signal during bundle reading stops fixture verification from being scheduled', async (t) => {
@@ -800,6 +926,91 @@ test('a signal during bundle reading stops fixture verification from being sched
   assert.equal(result.exitCode, 143)
   assert.equal(result.report.status, 'interrupted')
   assert.equal(harness.fixtureCalls(), 0)
+})
+
+test('sampling lifecycle lock deletion, replacement, and symlink failures are FIXTURE_DRIFT', async (t) => {
+  for (const mode of ['delete', 'replace', 'symlink']) {
+    const harness = await createHarness()
+    t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+    const originalVerifier = harness.dependencies.fixtureVerifier
+    let verifierCalls = 0
+    const lockPath = join(
+      harness.repositoryRoot,
+      'artifacts',
+      'perf',
+      'fixtures',
+      'current',
+      'fixtures.lock.json',
+    )
+    harness.dependencies.fixtureVerifier = async (argumentsValue) => {
+      const verified = await originalVerifier(argumentsValue)
+      verifierCalls += 1
+      if (verifierCalls === 1) {
+        if (mode === 'delete') {
+          await rm(lockPath)
+        } else if (mode === 'replace') {
+          await writeFile(lockPath, '{}')
+        } else {
+          const replacement = join(harness.temporary, `replacement-${mode}.json`)
+          await writeFile(replacement, '{}')
+          await rm(lockPath)
+          await symlink(replacement, lockPath)
+        }
+      }
+      return verified
+    }
+
+    const result = await runExternalSampler(harness.options, harness.dependencies)
+
+    assert.equal(result.exitCode, 3, mode)
+    assert.equal(result.report.failure.code, 'FIXTURE_DRIFT', mode)
+    assert.equal(result.report.usable, false, mode)
+    assert.doesNotThrow(() => validateRunReport(result.report), mode)
+  }
+})
+
+test('pre-top and final fixture lock path failures are schema-valid sampling drift', async (t) => {
+  for (const phase of ['pre-top', 'final']) {
+    for (const mode of ['delete', 'replace', 'symlink']) {
+      const harness = await createHarness()
+      t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+      const originalVerifier = harness.dependencies.fixtureVerifier
+      let verifierCalls = 0
+      const lockPath = join(
+        harness.repositoryRoot,
+        'artifacts',
+        'perf',
+        'fixtures',
+        'current',
+        'fixtures.lock.json',
+      )
+      const targetCall = phase === 'pre-top' ? 2 : 3
+      harness.dependencies.fixtureVerifier = async (argumentsValue) => {
+        const verified = await originalVerifier(argumentsValue)
+        verifierCalls += 1
+        if (verifierCalls === targetCall) {
+          if (mode === 'delete') {
+            await rm(lockPath)
+          } else if (mode === 'replace') {
+            await writeFile(lockPath, '{}')
+          } else {
+            const replacement = join(harness.temporary, `${phase}-${mode}.json`)
+            await writeFile(replacement, '{}')
+            await rm(lockPath)
+            await symlink(replacement, lockPath)
+          }
+        }
+        return verified
+      }
+
+      const result = await runExternalSampler(harness.options, harness.dependencies)
+
+      assert.equal(result.exitCode, 3, `${phase}/${mode}`)
+      assert.equal(result.report.failure.code, 'FIXTURE_DRIFT', `${phase}/${mode}`)
+      assert.equal(result.report.usable, false, `${phase}/${mode}`)
+      assert.doesNotThrow(() => validateRunReport(result.report), `${phase}/${mode}`)
+    }
+  }
 })
 
 test('unavailable required sampler tools are schema-valid preflight exit-2 refusals', async (t) => {
@@ -995,7 +1206,7 @@ test('SIGTERM after the completed run.json write resolves atomically leaves an i
   let completedRunWritten = false
   harness.dependencies.writeNewFile = async (pathname, contents) => {
     await writeNewFile(pathname, contents)
-    if (pathname.endsWith('/run.json') && !completedRunWritten) {
+    if (pathname.includes('/.run.json.') && !completedRunWritten) {
       completedRunWritten = true
       harness.signalSource.emit('SIGTERM')
     }
@@ -1012,6 +1223,71 @@ test('SIGTERM after the completed run.json write resolves atomically leaves an i
   assert.equal(emitted.usable, false)
   assert.deepEqual(emitted.failure, result.report.failure)
   assert.doesNotThrow(() => validateRunReport(emitted))
+})
+
+test('a failed completed-report staging write cannot leave a truncated or completed run.json', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let injected = false
+  harness.dependencies.writeNewFile = async (pathname, contents) => {
+    if (pathname.includes('/.run.json.') && !injected) {
+      injected = true
+      await writeFile(pathname, String(contents).slice(0, 9))
+      harness.signalSource.emit('SIGTERM')
+      throw new Error('staging write failed after partial output')
+    }
+    return writeNewFile(pathname, contents)
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(injected, true)
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.status, 'interrupted')
+  assert.equal(result.report.usable, false)
+  try {
+    const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
+    assert.equal(emitted.status, 'interrupted')
+    assert.equal(emitted.usable, false)
+    assert.doesNotThrow(() => validateRunReport(emitted))
+  } catch (error) {
+    assert.equal(error?.code, 'ENOENT')
+  }
+})
+
+test('a staging rename failure leaves no usable run.json and returns a schema-valid unusable report', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  harness.dependencies.rename = async () => {
+    throw new Error('injected atomic rename failure')
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.report.usable, false)
+  assert.doesNotThrow(() => validateRunReport(result.report))
+  await assert.rejects(readFile(join(harness.output, 'run.json')), { code: 'ENOENT' })
+})
+
+test('an existing unowned run.json is never overwritten by completed or failure reporting', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let unownedPath
+  harness.dependencies.writeNewFile = async (pathname, contents) => {
+    const result = await writeNewFile(pathname, contents)
+    if (pathname.endsWith('/raw/metadata.json')) {
+      unownedPath = join(pathname.slice(0, -'/raw/metadata.json'.length), 'run.json')
+      await writeFile(unownedPath, 'unowned-by-this-run')
+    }
+    return result
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.report.usable, false)
+  assert.equal(await readFile(unownedPath, 'utf8'), 'unowned-by-this-run')
 })
 
 test('sample CLI wrapper passes parsed options to the external-only sampler and preserves its exit code', async () => {

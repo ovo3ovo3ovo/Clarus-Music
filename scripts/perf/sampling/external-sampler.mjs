@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { Buffer } from 'node:buffer'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { totalmem, cpus } from 'node:os'
@@ -311,8 +311,15 @@ export async function spawnFixedTool(
   const limits = normalizeOutputLimits(outputLimits)
   const graceMs = normalizeTerminationGraceMs(terminationGraceMs)
   return new Promise((resolvePromise, rejectPromise) => {
+    if (signalState?.signal) {
+      rejectPromise(new InterruptedError(signalState.signal))
+      return
+    }
     let child
     try {
+      if (signalState?.signal) {
+        throw new InterruptedError(signalState.signal)
+      }
       child = spawnProcess(executable, argv, {
         shell: false,
         env: { ...FIXED_ENVIRONMENT },
@@ -648,6 +655,23 @@ function fixtureFingerprint(verified, lockBytes) {
     files: files.map(
       (file) => `${file.role}\u0000${file.filename}\u0000${file.byteLength}\u0000${file.sha256}`,
     ),
+  }
+}
+
+function assertFixtureLockBytesMatch(lockBytes, expectedLock, label) {
+  let actualLock
+  try {
+    actualLock = JSON.parse(lockBytes.toString('utf8'))
+    if (canonicalJson(actualLock) !== canonicalJson(expectedLock)) {
+      throw new Error('lock contents differ from the verifier identity')
+    }
+  } catch (error) {
+    samplingError(
+      'FIXTURE_DRIFT',
+      'fixture',
+      `${label} changed during sampling: ${safeErrorMessage(error)}`,
+      error,
+    )
   }
 }
 
@@ -1056,6 +1080,7 @@ export async function runExternalSampler(options, dependencies = {}) {
   const signalState = { signal: null }
   const outputLimits = normalizeOutputLimits(dependencies.outputLimits)
   const writeArtifact = dependencies.writeNewFile ?? writeNewFile
+  const renameArtifact = dependencies.rename ?? rename
   let retainedToolOutputBytes = 0
   const state = {
     requestedAt: timestampNow(now),
@@ -1080,9 +1105,11 @@ export async function runExternalSampler(options, dependencies = {}) {
   let outputPath
   let rawDirectory
   let fixtureBefore
+  let fixtureBaselineVerified = false
   let fixtureVerifierClose
   let fixtureIntegrityGuard
   let completedRunContents
+  let runReportOwned = false
   let disposed = false
   const removeSignalListeners = () => {
     if (!disposed && signalSource && typeof signalSource.off === 'function') {
@@ -1128,22 +1155,52 @@ export async function runExternalSampler(options, dependencies = {}) {
     state.rawFiles.push(record)
     return record
   }
-  const replaceCompletedRunReport = async (contents) => {
-    const runPath = join(outputPath, 'run.json')
-    const stagingPath = join(outputPath, '.run.json.interrupted')
-    let staged = false
+  const runPath = () => join(outputPath, 'run.json')
+  const inspectRunReportOwnership = async () => {
+    let details
     try {
-      await writeArtifact(stagingPath, contents)
-      staged = true
-      const existing = await readNoFollowRegularFile(runPath, {
-        label: 'completed run report',
+      details = await lstat(runPath())
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        return 'absent'
+      }
+      return 'unowned'
+    }
+    if (!details.isFile() || details.isSymbolicLink()) {
+      return 'unowned'
+    }
+    if (!runReportOwned || !completedRunContents) {
+      return 'unowned'
+    }
+    try {
+      const current = await readNoFollowRegularFile(runPath(), {
+        label: 'run report',
         maxBytes: OUTPUT_LIMIT_BYTES.total,
       })
-      if (!completedRunContents || !existing.equals(completedRunContents)) {
+      return current.equals(completedRunContents) ? 'owned' : 'unowned'
+    } catch {
+      return 'unowned'
+    }
+  }
+  const commitRunReport = async (contents, { requireNoSignal = false } = {}) => {
+    const expectedOwnership = runReportOwned ? 'owned' : 'absent'
+    if ((await inspectRunReportOwnership()) !== expectedOwnership) {
+      return false
+    }
+    const stagingPath = join(outputPath, `.run.json.${randomUUID()}.staging`)
+    let staged = true
+    try {
+      await writeArtifact(stagingPath, contents)
+      if (requireNoSignal && signalState.signal) {
         return false
       }
-      await rename(stagingPath, runPath)
+      if ((await inspectRunReportOwnership()) !== expectedOwnership) {
+        return false
+      }
+      await renameArtifact(stagingPath, runPath())
       staged = false
+      runReportOwned = true
+      completedRunContents = Buffer.from(contents, 'utf8')
       return true
     } catch {
       return false
@@ -1153,20 +1210,22 @@ export async function runExternalSampler(options, dependencies = {}) {
       }
     }
   }
+  const removeOwnedRunReport = async () => {
+    if (runReportOwned && (await inspectRunReportOwnership()) === 'owned') {
+      await unlink(runPath()).catch(() => {})
+    }
+    runReportOwned = false
+  }
   const writeCompletedRunReport = async (report) => {
     const contents = `${JSON.stringify(report, null, 2)}\n`
-    await writeArtifact(join(outputPath, 'run.json'), contents)
-    completedRunContents = Buffer.from(contents, 'utf8')
+    if (!(await commitRunReport(contents, { requireNoSignal: true }))) {
+      samplingError('OUTPUT_COMMIT', 'output', 'could not atomically commit completed run report')
+    }
   }
   const writeFailureRunReport = async (report) => {
     const contents = `${JSON.stringify(report, null, 2)}\n`
-    if (completedRunContents && (await replaceCompletedRunReport(contents))) {
-      return
-    }
-    try {
-      await writeArtifact(join(outputPath, 'run.json'), contents)
-    } catch {
-      // A best-effort failure report must never overwrite an unowned output.
+    if (!(await commitRunReport(contents))) {
+      await removeOwnedRunReport()
     }
   }
   const executeTool = async (
@@ -1284,7 +1343,7 @@ export async function runExternalSampler(options, dependencies = {}) {
     }
     fixtureIntegrityGuard = undefined
   }
-  const fixtureToolRunner =
+  const fixtureToolRunnerImplementation =
     dependencies.fixtureToolRunner ??
     dependencies.fixtureCommandRunner ??
     ((executable, argv, options = {}) =>
@@ -1297,57 +1356,124 @@ export async function runExternalSampler(options, dependencies = {}) {
         spawnProcess: dependencies.spawnProcess,
         terminationGraceMs: dependencies.terminationGraceMs,
       }))
+  const fixtureToolRunner = async (...argumentsList) => {
+    assertNotInterrupted()
+    const result = await fixtureToolRunnerImplementation(...argumentsList)
+    assertNotInterrupted()
+    return result
+  }
   const verifyFixtures = async (verifier, directory) => {
     assertNotInterrupted()
-    const verified = await verifier({ directory, activeChildren, run: fixtureToolRunner })
-    if (signalState.signal) {
-      await Promise.resolve(verified?.close?.()).catch(() => {})
+    let verified
+    try {
+      verified = await verifier({ directory, activeChildren, run: fixtureToolRunner })
+    } catch (error) {
+      if (signalState.signal) {
+        throw new InterruptedError(signalState.signal)
+      }
+      if (error instanceof SamplingError) {
+        throw error
+      }
+      if (fixtureBaselineVerified) {
+        samplingError(
+          'FIXTURE_DRIFT',
+          'fixture',
+          `fixture verification failed during sampling: ${safeErrorMessage(error)}`,
+          error,
+        )
+      }
+      if (error instanceof PerfInputError) {
+        throw error
+      }
+      throw new PerfInputError(`Fixture verification refused: ${safeErrorMessage(error)}`)
     }
-    assertNotInterrupted()
+    try {
+      if (signalState.signal) {
+        await Promise.resolve(verified?.close?.()).catch(() => {})
+      }
+      assertNotInterrupted()
+      if (fixtureIntegrityGuard) {
+        await fixtureIntegrityGuard.assertUnchanged('fixture-verifier')
+      }
+    } catch (error) {
+      await Promise.resolve(verified?.close?.()).catch(() => {})
+      throw error
+    }
     return verified
   }
+  const readFixtureLock = async (pathname, label) => {
+    assertNotInterrupted()
+    try {
+      const contents = await readNoFollowRegularFile(pathname, { label })
+      assertNotInterrupted()
+      return contents
+    } catch (error) {
+      if (signalState.signal) {
+        throw new InterruptedError(signalState.signal)
+      }
+      if (fixtureBaselineVerified) {
+        samplingError(
+          'FIXTURE_DRIFT',
+          'fixture',
+          `${label} could not be read during sampling: ${safeErrorMessage(error)}`,
+          error,
+        )
+      }
+      throw error
+    }
+  }
   const captureAttribution = async (baseline, label) => {
+    assertNotInterrupted()
+    let result
     if (dependencies.captureAttribution) {
-      return dependencies.captureAttribution({
+      result = await dependencies.captureAttribution({
         rootPid: options.rootPid,
         bundle: state.bundle,
         baseline,
         label,
       })
+    } else {
+      result = await captureMacosAttribution({
+        rootPid: options.rootPid,
+        bundle: state.bundle,
+        helperPaths: dependencies.helperPaths,
+        runCommand: async (file, argv) => {
+          const tool = Object.entries(TOOL_PATHS).find(([, path]) => path === file)?.[0]
+          if (!tool)
+            samplingError('TOOL_REFUSED', 'attribution', `unexpected attribution tool ${file}`)
+          const entry = await executeTool(
+            'attribution',
+            tool,
+            argv,
+            `${tool}-${state.commands.length}`,
+          )
+          return {
+            stdout: entry.stdout.toString('utf8'),
+            stderr: entry.stderr.toString('utf8'),
+            exitCode: entry.exitCode,
+          }
+        },
+      })
     }
-    return captureMacosAttribution({
-      rootPid: options.rootPid,
-      bundle: state.bundle,
-      helperPaths: dependencies.helperPaths,
-      runCommand: async (file, argv) => {
-        const tool = Object.entries(TOOL_PATHS).find(([, path]) => path === file)?.[0]
-        if (!tool)
-          samplingError('TOOL_REFUSED', 'attribution', `unexpected attribution tool ${file}`)
-        const entry = await executeTool(
-          'attribution',
-          tool,
-          argv,
-          `${tool}-${state.commands.length}`,
-        )
-        return {
-          stdout: entry.stdout.toString('utf8'),
-          stderr: entry.stderr.toString('utf8'),
-          exitCode: entry.exitCode,
-        }
-      },
-    })
+    assertNotInterrupted()
+    return result
   }
   const revalidate = async (baseline, label) => {
+    assertNotInterrupted()
+    let result
     if (dependencies.revalidateAttribution) {
-      return dependencies.revalidateAttribution({
+      result = await dependencies.revalidateAttribution({
         rootPid: options.rootPid,
         baseline,
         bundle: state.bundle,
         label,
       })
+    } else {
+      const current = await captureAttribution(undefined, label)
+      result = compareAttributionIdentity(baseline, current)
     }
-    const current = await captureAttribution(undefined, label)
-    return compareAttributionIdentity(baseline, current)
+    assertNotInterrupted()
+    return result
   }
   try {
     if (!options || typeof options !== 'object') {
@@ -1365,10 +1491,12 @@ export async function runExternalSampler(options, dependencies = {}) {
       root: repositoryRoot,
       repositoryRoot,
     })
+    assertNotInterrupted()
     const metadataRead = await readJsonNoFollow(metadataPath, {
       label: 'metadata',
       maxBytes: METADATA_MAX_BYTES,
     })
+    assertNotInterrupted()
     state.metadata = validateMetadataInput(metadataRead.value)
     if (state.metadata.scenarioClass === 'startup') {
       throw new PerfInputError('perf:sample refuses startup scenarioClass measurements')
@@ -1377,9 +1505,12 @@ export async function runExternalSampler(options, dependencies = {}) {
       root: roots.runsRoot,
       repositoryRoot,
     })
+    assertNotInterrupted()
     rawDirectory = join(outputPath, 'raw')
     await mkdir(rawDirectory)
+    assertNotInterrupted()
     await writeRaw('raw/metadata.json', 'metadata', metadataRead.contents)
+    assertNotInterrupted()
     state.startedAt = timestampNow(now)
     assertNotInterrupted()
 
@@ -1387,6 +1518,7 @@ export async function runExternalSampler(options, dependencies = {}) {
     const available = dependencies.toolAvailable ?? isExecutableRegularFile
     let unavailableTool
     for (const [name, path] of Object.entries(TOOL_PATHS)) {
+      assertNotInterrupted()
       const present = await available(path)
       assertNotInterrupted()
       availability.set(name, present === true)
@@ -1416,6 +1548,7 @@ export async function runExternalSampler(options, dependencies = {}) {
     const expectedReleaseBundlePath = dependencies.expectedBundlePath ?? expectedBundlePath
     const appBundlePath = resolve(repositoryRoot, options.appBundle)
     const bundleReader = dependencies.readBundle ?? readReleaseBundle
+    assertNotInterrupted()
     state.bundle = await bundleReader({
       appBundlePath,
       expectedBundlePath: expectedReleaseBundlePath,
@@ -1451,10 +1584,14 @@ export async function runExternalSampler(options, dependencies = {}) {
 
     const verifier = dependencies.fixtureVerifier ?? verifyFixtureSet
     const verified = await verifyFixtures(verifier, options.fixtureDirectory)
+    assertNotInterrupted()
     fixtureVerifierClose = verified.close
     const lockPath = join(verified.directory, 'fixtures.lock.json')
-    const lockBytes = await readNoFollowRegularFile(lockPath, { label: 'fixture lock' })
+    fixtureBaselineVerified = true
+    const lockBytes = await readFixtureLock(lockPath, 'fixture lock')
+    assertFixtureLockBytesMatch(lockBytes, verified.lock, 'fixture lock')
     await writeRaw('raw/fixtures.lock.json', 'fixture-lock', lockBytes)
+    assertNotInterrupted()
     fixtureBefore = fixtureFingerprint(verified, lockBytes)
     state.fixture = {
       directory: fixtureBefore.directory,
@@ -1463,10 +1600,13 @@ export async function runExternalSampler(options, dependencies = {}) {
       recipeVersion: verified.lock.recipeVersion,
       roles: normalizeFixtureRoles(verified.lock),
     }
+    fixtureIntegrityGuard = await retainFixtureIntegrityGuard(verified)
+    assertNotInterrupted()
     state.metadata = validateMetadataInput(state.metadata, {
       fixtureRoles: new Set(state.fixture.roles.map((role) => role.role)),
     })
     await closeFixture()
+    assertNotInterrupted()
     state.controls = {
       metadata: state.metadata,
       sha256: canonicalSha256(normalizeControlsMetadata(state.metadata)),
@@ -1497,7 +1637,9 @@ export async function runExternalSampler(options, dependencies = {}) {
           osBuild: buildVersion.parsed || null,
         }
       })
+    assertNotInterrupted()
     state.host = await hostReader()
+    assertNotInterrupted()
     const gitReader = dependencies.readGit
       ? dependencies.readGit
       : async () =>
@@ -1506,11 +1648,15 @@ export async function runExternalSampler(options, dependencies = {}) {
             run: async (_name, argv, label) =>
               executeTool('source', 'git', argv, `${label}-${state.commands.length}`),
           })
+    assertNotInterrupted()
     const git = await gitReader()
+    assertNotInterrupted()
     state.source.gitCommit = git.commit
     state.source.dirty = git.dirty
 
+    assertNotInterrupted()
     state.attribution = await captureAttribution(undefined, 'preflight')
+    assertNotInterrupted()
     const attributionPreSnapshot = state.attribution.preSnapshot
     state.attribution = await revalidate(state.attribution, 'before-numeric')
     assertNotInterrupted()
@@ -1528,16 +1674,22 @@ export async function runExternalSampler(options, dependencies = {}) {
       samplingError('ATTRIBUTION_INVALID', 'attribution', 'attributed role PIDs must be unique')
     }
     const verifiedBeforeTop = await verifyFixtures(verifier, options.fixtureDirectory)
+    assertNotInterrupted()
     fixtureVerifierClose = verifiedBeforeTop.close
-    const beforeTopLockBytes = await readNoFollowRegularFile(
+    const beforeTopLockBytes = await readFixtureLock(
       join(verifiedBeforeTop.directory, 'fixtures.lock.json'),
-      { label: 'fixture lock before numeric sampling' },
+      'fixture lock before numeric sampling',
+    )
+    assertFixtureLockBytesMatch(
+      beforeTopLockBytes,
+      verifiedBeforeTop.lock,
+      'fixture lock before numeric sampling',
     )
     const fixtureBeforeTop = fixtureFingerprint(verifiedBeforeTop, beforeTopLockBytes)
     if (!sameFixtureFingerprint(fixtureBefore, fixtureBeforeTop)) {
       samplingError('FIXTURE_DRIFT', 'fixture', 'fixture changed before numeric sampling')
     }
-    fixtureIntegrityGuard = await retainFixtureIntegrityGuard(verifiedBeforeTop)
+    await fixtureIntegrityGuard.assertUnchanged('before-top')
     await closeFixture()
     const top = await executeTool(
       'top',
@@ -1706,12 +1858,13 @@ export async function runExternalSampler(options, dependencies = {}) {
     await fixtureIntegrityGuard.assertUnchanged('post-collection')
     const verifiedAfter = await verifyFixtures(verifier, options.fixtureDirectory)
     fixtureVerifierClose = verifiedAfter.close
-    const afterLockBytes = await readNoFollowRegularFile(
+    await fixtureIntegrityGuard.assertUnchanged('final-verifier')
+    const afterLockBytes = await readFixtureLock(
       join(verifiedAfter.directory, 'fixtures.lock.json'),
-      {
-        label: 'fixture lock after sampling',
-      },
+      'fixture lock after sampling',
     )
+    assertFixtureLockBytesMatch(afterLockBytes, verifiedAfter.lock, 'fixture lock after sampling')
+    await fixtureIntegrityGuard.assertUnchanged('final-lock')
     const fixtureAfter = fixtureFingerprint(verifiedAfter, afterLockBytes)
     await closeFixture()
     assertNotInterrupted()

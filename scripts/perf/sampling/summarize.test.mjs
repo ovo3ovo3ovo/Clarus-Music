@@ -482,3 +482,31 @@ test('accepts a canonical run input through a symlinked ancestor outside the rep
 
   assert.equal(result.exitCode, 0)
 })
+
+test('rejects repo-external leaf and parent symlinks that resolve into canonical runs', async (t) => {
+  const setup = await setupRuns([makeRun({ runId: 'idle-r01', runIndex: 1 })])
+  t.after(() => rm(setup.temporary, { recursive: true, force: true }))
+
+  const externalLeafDirectory = join(setup.temporary, 'external-leaf')
+  await mkdir(externalLeafDirectory)
+  const externalLeaf = join(externalLeafDirectory, 'run.json')
+  await symlink(setup.inputs[0], externalLeaf)
+  const leafResult = await runSummarizer(
+    { inputs: [externalLeaf], output: join(setup.summariesRoot, 'external-leaf-input') },
+    { repositoryRoot: setup.repositoryRoot, roots: { summariesRoot: setup.summariesRoot } },
+  )
+  assert.equal(leafResult.exitCode, 2)
+  assert.match(leafResult.error?.message ?? '', /symbolic link|symlink|outside|runs/i)
+
+  const externalParent = join(setup.temporary, 'external-runs-link')
+  await symlink(setup.runsRoot, externalParent)
+  const parentResult = await runSummarizer(
+    {
+      inputs: [join(externalParent, 'idle-r01', 'run.json')],
+      output: join(setup.summariesRoot, 'external-parent'),
+    },
+    { repositoryRoot: setup.repositoryRoot, roots: { summariesRoot: setup.summariesRoot } },
+  )
+  assert.equal(parentResult.exitCode, 2)
+  assert.match(parentResult.error?.message ?? '', /symbolic link|symlink|outside|runs/i)
+})

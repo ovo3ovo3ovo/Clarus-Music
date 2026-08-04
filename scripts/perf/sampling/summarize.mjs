@@ -54,8 +54,8 @@ function assertSafeSummarizerInputPath(pathname) {
   }
 }
 
-async function assertNoRepositorySymlinkComponents(pathname, physicalRepositoryRoot) {
-  const components = resolve(pathname).split(sep).filter(Boolean)
+async function assertNoRepositorySymlinkComponents(candidate, physicalRepositoryRoot) {
+  const components = candidate.split(sep).filter(Boolean)
   let current = sep
   for (const component of components) {
     const parent = current
@@ -66,12 +66,23 @@ async function assertNoRepositorySymlinkComponents(pathname, physicalRepositoryR
       details = await lstat(current)
       physicalParent = await realpath(parent)
     } catch (error) {
-      refusal(`Unable to inspect summarizer input path ${pathname}: ${error.message}`)
+      refusal(`Unable to inspect summarizer input path ${candidate}: ${error.message}`)
     }
-    if (isContainedPath(physicalRepositoryRoot, physicalParent) && details.isSymbolicLink()) {
-      refusal(
-        `Summarizer input ${pathname} must not traverse symbolic link components within the repository`,
-      )
+    if (details.isSymbolicLink()) {
+      let physicalTarget
+      try {
+        physicalTarget = await realpath(current)
+      } catch (error) {
+        refusal(`Unable to resolve summarizer input path ${candidate}: ${error.message}`)
+      }
+      if (
+        isContainedPath(physicalRepositoryRoot, physicalParent) ||
+        isContainedPath(physicalRepositoryRoot, physicalTarget)
+      ) {
+        refusal(
+          `Summarizer input ${candidate} must not traverse symbolic link components after entering the repository`,
+        )
+      }
     }
   }
 }
