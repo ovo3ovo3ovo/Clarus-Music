@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { setTimeout } from 'node:timers'
@@ -11,6 +11,7 @@ import {
   parseSampleArguments,
   resolveStrictChildPath,
   resolveStrictNoFollowChildPath,
+  writeNewFile,
 } from './cli-support.mjs'
 import {
   OUTPUT_LIMIT_BYTES,
@@ -102,8 +103,20 @@ function attribution() {
     method: 'launchservices-coalition',
     rootPid: 4101,
     coalition: { id: '17', asn: '0x17' },
-    preSnapshot: records.map(({ pid, start, path, realpath }) => ({ pid, ppid: 1, start, path, realpath })),
-    postSnapshot: records.map(({ pid, start, path, realpath }) => ({ pid, ppid: 1, start, path, realpath })),
+    preSnapshot: records.map(({ pid, start, path, realpath }) => ({
+      pid,
+      ppid: 1,
+      start,
+      path,
+      realpath,
+    })),
+    postSnapshot: records.map(({ pid, start, path, realpath }) => ({
+      pid,
+      ppid: 1,
+      start,
+      path,
+      realpath,
+    })),
     selected: records,
     unselected: [],
   }
@@ -169,6 +182,9 @@ async function createHarness({
   await mkdir(join(repositoryRoot, 'artifacts', 'perf', 'metadata'), { recursive: true })
   await writeFile(metadataPath, JSON.stringify(metadataValue))
   await writeFile(join(fixtureDirectory, 'fixtures.lock.json'), JSON.stringify(lock()))
+  for (const fixture of lock().files) {
+    await writeFile(join(fixtureDirectory, fixture.filename), fixture.filename.slice(0, 1))
+  }
   const calls = []
   let fixtureCalls = 0
   let fixtureCloses = 0
@@ -312,9 +328,15 @@ test('sample CLI rejects unknown, duplicate, positional, equals, invalid number,
     [...valid.rawArguments, 'positional'],
     [...valid.rawArguments.slice(0, 2), '--root-pid=2', ...valid.rawArguments.slice(2)],
   ]) {
-    assert.throws(() => parseSampleArguments(argumentsList), /option|duplicate|positional|equals|key=value/i)
+    assert.throws(
+      () => parseSampleArguments(argumentsList),
+      /option|duplicate|positional|equals|key=value/i,
+    )
   }
-  assert.throws(() => parseSampleArguments([...valid.rawArguments, '--root-pid', '1']), /duplicate/i)
+  assert.throws(
+    () => parseSampleArguments([...valid.rawArguments, '--root-pid', '1']),
+    /duplicate/i,
+  )
   const emptyBundle = [...valid.rawArguments]
   emptyBundle[1] = ''
   assert.throws(() => parseSampleArguments(emptyBundle), /requires a value/i)
@@ -322,13 +344,26 @@ test('sample CLI rejects unknown, duplicate, positional, equals, invalid number,
   assert.throws(
     () =>
       parseSampleArguments([
-        '--app-bundle', 'a', '--root-pid', '2', '--fixture-directory', 'f', '--metadata', 'm', '--output', 'o',
-        '--samples', '3600', '--interval-ms', '60000',
+        '--app-bundle',
+        'a',
+        '--root-pid',
+        '2',
+        '--fixture-directory',
+        'f',
+        '--metadata',
+        'm',
+        '--output',
+        'o',
+        '--samples',
+        '3600',
+        '--interval-ms',
+        '60000',
       ]),
     /3600000/i,
   )
   assert.throws(
-    () => resolveStrictChildPath('../outside', { root: '/tmp/perf/runs', repositoryRoot: '/tmp/perf' }),
+    () =>
+      resolveStrictChildPath('../outside', { root: '/tmp/perf/runs', repositoryRoot: '/tmp/perf' }),
     /traversal|strict child/i,
   )
 })
@@ -364,7 +399,10 @@ test('metadata paths must stay under the repository without absolute, traversal,
   const absoluteMetadata = join(absoluteHarness.temporary, 'absolute-metadata.json')
   await writeFile(absoluteMetadata, JSON.stringify(metadata()))
   absoluteHarness.options.metadata = absoluteMetadata
-  const absoluteResult = await runExternalSampler(absoluteHarness.options, absoluteHarness.dependencies)
+  const absoluteResult = await runExternalSampler(
+    absoluteHarness.options,
+    absoluteHarness.dependencies,
+  )
   assert.equal(absoluteResult.exitCode, 2)
 
   const traversalHarness = await createHarness()
@@ -372,7 +410,10 @@ test('metadata paths must stay under the repository without absolute, traversal,
   const traversalMetadata = join(traversalHarness.temporary, 'traversal-metadata.json')
   await writeFile(traversalMetadata, JSON.stringify(metadata()))
   traversalHarness.options.metadata = '../traversal-metadata.json'
-  const traversalResult = await runExternalSampler(traversalHarness.options, traversalHarness.dependencies)
+  const traversalResult = await runExternalSampler(
+    traversalHarness.options,
+    traversalHarness.dependencies,
+  )
   assert.equal(traversalResult.exitCode, 2)
 
   const symlinkHarness = await createHarness()
@@ -385,7 +426,10 @@ test('metadata paths must stay under the repository without absolute, traversal,
     join(symlinkHarness.repositoryRoot, 'artifacts', 'perf', 'metadata', 'linked-parent'),
   )
   symlinkHarness.options.metadata = 'artifacts/perf/metadata/linked-parent/metadata.json'
-  const symlinkResult = await runExternalSampler(symlinkHarness.options, symlinkHarness.dependencies)
+  const symlinkResult = await runExternalSampler(
+    symlinkHarness.options,
+    symlinkHarness.dependencies,
+  )
   assert.equal(symlinkResult.exitCode, 2)
 })
 
@@ -394,10 +438,13 @@ test('top and footprint parsers require complete fixed-PID numeric evidence and 
   assert.equal(groups.length, 6)
   assert.equal(groups[0].get(4101).cpuPercent, 99)
   assert.equal(groups[1].get(4101).threadCount, 11)
-  assert.deepEqual(parseFootprintOutput('Physical footprint: 10\nPhysical footprint (peak): 20\n'), {
-    physicalFootprintBytes: 10,
-    physicalFootprintPeakBytes: 20,
-  })
+  assert.deepEqual(
+    parseFootprintOutput('Physical footprint: 10\nPhysical footprint (peak): 20\n'),
+    {
+      physicalFootprintBytes: 10,
+      physicalFootprintPeakBytes: 20,
+    },
+  )
   assert.throws(() => parseTopOutput('PID CPU% TH\n4101 1% 1', { pids: [4101, 4102] }), /missing/i)
   assert.throws(() => parseFootprintOutput('Physical footprint: 10'), /peak/i)
   assert.throws(
@@ -543,7 +590,14 @@ test('runs deterministic external sampling with fixture verification, warmup rem
   ])
   const topCall = harness.calls.find((call) => call.file === '/usr/bin/top')
   assert.deepEqual(topCall.argv, [
-    '-l', '6', '-s', '0.25', '-stats', 'pid,cpu,threads', '-pid', '4101,4102,4103,4104',
+    '-l',
+    '6',
+    '-s',
+    '0.25',
+    '-stats',
+    'pid,cpu,threads',
+    '-pid',
+    '4101,4102,4103,4104',
   ])
   for (const call of harness.calls) {
     assert.equal(call.options.shell, false)
@@ -560,17 +614,33 @@ test('runs deterministic external sampling with fixture verification, warmup rem
   validateRunReport(report)
   assert.equal(report.status, 'completed')
   assert.equal(report.measurements.filter((entry) => entry.phase === 'top').length, 40)
-  assert.equal(report.measurements.find((entry) => entry.phase === 'top' && entry.sampleIndex === 0 && entry.pid === 4101).value, 1)
+  assert.equal(
+    report.measurements.find(
+      (entry) => entry.phase === 'top' && entry.sampleIndex === 0 && entry.pid === 4101,
+    ).value,
+    1,
+  )
   assert.equal(report.measurements.filter((entry) => entry.role === 'process-total').length, 5)
-  assert.match(await readFile(join(harness.output, 'summary.txt'), 'utf8'), /^MEASUREMENT INFRASTRUCTURE OUTPUT — NOT EVIDENCE OF PRODUCT IMPROVEMENT\./)
-  assert.match(await readFile(join(harness.output, 'measurements.csv'), 'utf8'), /^schema_version,run_id,scenario,run_index,sample_index,/)
-  assert.match(await readFile(join(harness.output, 'raw', 'sample-main.stdout.txt'), 'utf8'), /sample 4101/)
+  assert.match(
+    await readFile(join(harness.output, 'summary.txt'), 'utf8'),
+    /^MEASUREMENT INFRASTRUCTURE OUTPUT — NOT EVIDENCE OF PRODUCT IMPROVEMENT\./,
+  )
+  assert.match(
+    await readFile(join(harness.output, 'measurements.csv'), 'utf8'),
+    /^schema_version,run_id,scenario,run_index,sample_index,/,
+  )
+  assert.match(
+    await readFile(join(harness.output, 'raw', 'sample-main.stdout.txt'), 'utf8'),
+    /sample 4101/,
+  )
 })
 
 test('sampling and fixture-drift failures retain partial raw evidence and are unusable', async (t) => {
   const failedHarness = await createHarness({
     onCommand: async (file) =>
-      file === '/usr/bin/top' ? { exitCode: 1, stdout: 'partial top', stderr: 'denied' } : undefined,
+      file === '/usr/bin/top'
+        ? { exitCode: 1, stdout: 'partial top', stderr: 'denied' }
+        : undefined,
   })
   t.after(() => rm(failedHarness.temporary, { recursive: true, force: true }))
   const failed = await runExternalSampler(failedHarness.options, failedHarness.dependencies)
@@ -578,7 +648,10 @@ test('sampling and fixture-drift failures retain partial raw evidence and are un
   const failedReport = JSON.parse(await readFile(join(failedHarness.output, 'run.json'), 'utf8'))
   assert.equal(failedReport.usable, false)
   assert.equal(failedReport.status, 'failed')
-  assert.match(await readFile(join(failedHarness.output, 'raw', 'top.stdout.txt'), 'utf8'), /partial top/)
+  assert.match(
+    await readFile(join(failedHarness.output, 'raw', 'top.stdout.txt'), 'utf8'),
+    /partial top/,
+  )
 
   const driftHarness = await createHarness({ afterLock: { ...lock(), recipeVersion: 'changed' } })
   t.after(() => rm(driftHarness.temporary, { recursive: true, force: true }))
@@ -632,7 +705,46 @@ test('pre-top fixture verification stops changed-then-restored fixture drift bef
   assert.equal(result.exitCode, 3)
   assert.equal(result.report.failure.code, 'FIXTURE_DRIFT')
   assert.equal(harness.fixtureCalls(), 2)
-  assert.equal(harness.calls.some((call) => call.file === '/usr/bin/top'), false)
+  assert.equal(
+    harness.calls.some((call) => call.file === '/usr/bin/top'),
+    false,
+  )
+})
+
+test('fixture bytes changed and restored during top still make the run unusable', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  const fixturePath = join(
+    harness.repositoryRoot,
+    'artifacts',
+    'perf',
+    'fixtures',
+    'current',
+    'tone-short-mp3.mp3',
+  )
+  const originalBytes = await readFile(fixturePath)
+  const commandRunner = harness.dependencies.commandRunner
+  harness.dependencies.commandRunner = async (file, argv, options) => {
+    if (file === '/usr/bin/top') {
+      await writeFile(fixturePath, 'x')
+      await writeFile(fixturePath, originalBytes)
+      await utimes(
+        fixturePath,
+        new Date('2000-01-01T00:00:00.000Z'),
+        new Date('2000-01-01T00:00:00.000Z'),
+      )
+    }
+    return commandRunner(file, argv, options)
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.report.failure.code, 'FIXTURE_DRIFT')
+  assert.equal(result.report.usable, false)
+  const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
+  assert.equal(emitted.usable, false)
+  assert.equal(emitted.failure.code, 'FIXTURE_DRIFT')
 })
 
 test('a signal after before-numeric attribution stops pre-top fixture work from being scheduled', async (t) => {
@@ -652,7 +764,60 @@ test('a signal after before-numeric attribution stops pre-top fixture work from 
   assert.equal(result.exitCode, 143)
   assert.equal(result.report.status, 'interrupted')
   assert.equal(harness.fixtureCalls(), 1)
-  assert.equal(harness.calls.some((call) => call.file === '/usr/bin/top'), false)
+  assert.equal(
+    harness.calls.some((call) => call.file === '/usr/bin/top'),
+    false,
+  )
+})
+
+test('a signal during required tool availability stops fixture verification from being scheduled', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  harness.dependencies.toolAvailable = async () => {
+    harness.signalSource.emit('SIGTERM')
+    return true
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.status, 'interrupted')
+  assert.equal(harness.fixtureCalls(), 0)
+})
+
+test('a signal during bundle reading stops fixture verification from being scheduled', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  const readBundle = harness.dependencies.readBundle
+  harness.dependencies.readBundle = async (options) => {
+    const bundle = await readBundle(options)
+    harness.signalSource.emit('SIGTERM')
+    return bundle
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.status, 'interrupted')
+  assert.equal(harness.fixtureCalls(), 0)
+})
+
+test('unavailable required sampler tools are schema-valid preflight exit-2 refusals', async (t) => {
+  for (const unavailablePath of ['/usr/bin/top', '/usr/bin/footprint']) {
+    const harness = await createHarness()
+    t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+    harness.dependencies.toolAvailable = async (pathname) => pathname !== unavailablePath
+
+    const result = await runExternalSampler(harness.options, harness.dependencies)
+
+    assert.equal(result.exitCode, 2)
+    assert.equal(result.report.failure.code, 'TOOL_UNAVAILABLE')
+    assert.equal(result.report.failure.phase, 'preflight')
+    assert.doesNotThrow(() => validateRunReport(result.report))
+    const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
+    assert.deepEqual(emitted.failure, result.report.failure)
+    assert.doesNotThrow(() => validateRunReport(emitted))
+  }
 })
 
 test('fails closed for unavailable tools, permission denial, parser drift, and attribution drift', async (t) => {
@@ -683,11 +848,16 @@ test('fails closed for unavailable tools, permission denial, parser drift, and a
   const unavailableHarness = await createHarness()
   t.after(() => rm(unavailableHarness.temporary, { recursive: true, force: true }))
   unavailableHarness.dependencies.toolAvailable = async (pathname) => pathname !== '/usr/bin/top'
-  const unavailable = await runExternalSampler(unavailableHarness.options, unavailableHarness.dependencies)
-  assert.equal(unavailable.exitCode, 3)
+  const unavailable = await runExternalSampler(
+    unavailableHarness.options,
+    unavailableHarness.dependencies,
+  )
+  assert.equal(unavailable.exitCode, 2)
   assert.equal(unavailable.report.failure.code, 'TOOL_UNAVAILABLE')
   assert.doesNotThrow(() => validateRunReport(unavailable.report))
-  const unavailableRun = JSON.parse(await readFile(join(unavailableHarness.output, 'run.json'), 'utf8'))
+  const unavailableRun = JSON.parse(
+    await readFile(join(unavailableHarness.output, 'run.json'), 'utf8'),
+  )
   assert.doesNotThrow(() => validateRunReport(unavailableRun))
   assert.deepEqual(unavailableRun.failure, unavailable.report.failure)
 
@@ -698,13 +868,18 @@ test('fails closed for unavailable tools, permission denial, parser drift, and a
         : undefined,
   })
   t.after(() => rm(permissionHarness.temporary, { recursive: true, force: true }))
-  const permission = await runExternalSampler(permissionHarness.options, permissionHarness.dependencies)
+  const permission = await runExternalSampler(
+    permissionHarness.options,
+    permissionHarness.dependencies,
+  )
   assert.equal(permission.exitCode, 3)
   assert.equal(permission.report.failure.code, 'PERMISSION_DENIED')
 
   const parserHarness = await createHarness({
     onCommand: async (file) =>
-      file === '/usr/bin/top' ? { exitCode: 0, stdout: 'PID CPU% TH\n4101 1% 1', stderr: '' } : undefined,
+      file === '/usr/bin/top'
+        ? { exitCode: 0, stdout: 'PID CPU% TH\n4101 1% 1', stderr: '' }
+        : undefined,
   })
   t.after(() => rm(parserHarness.temporary, { recursive: true, force: true }))
   const parser = await runExternalSampler(parserHarness.options, parserHarness.dependencies)
@@ -735,7 +910,9 @@ test('fails closed for unavailable tools, permission denial, parser drift, and a
 test('timeout, output limit, and signals stop scheduling without signaling an attributed target', async (t) => {
   const timeoutHarness = await createHarness({
     onCommand: async (file) =>
-      file === '/usr/bin/top' ? { exitCode: null, timedOut: true, stdout: 'partial', stderr: '' } : undefined,
+      file === '/usr/bin/top'
+        ? { exitCode: null, timedOut: true, stdout: 'partial', stderr: '' }
+        : undefined,
   })
   t.after(() => rm(timeoutHarness.temporary, { recursive: true, force: true }))
   const timeout = await runExternalSampler(timeoutHarness.options, timeoutHarness.dependencies)
@@ -759,7 +936,10 @@ test('timeout, output limit, and signals stop scheduling without signaling an at
   })
   aggregateHarness.dependencies.outputLimits = { stdout: 1024, stderr: 1024, total: 10 }
   t.after(() => rm(aggregateHarness.temporary, { recursive: true, force: true }))
-  const aggregate = await runExternalSampler(aggregateHarness.options, aggregateHarness.dependencies)
+  const aggregate = await runExternalSampler(
+    aggregateHarness.options,
+    aggregateHarness.dependencies,
+  )
   assert.equal(aggregate.exitCode, 3)
   assert.equal(aggregate.report.failure.code, 'OUTPUT_LIMIT')
   assert.equal(
@@ -809,14 +989,49 @@ test('a signal observed during final closeout cannot return a completed usable r
   assert.doesNotThrow(() => validateRunReport(emitted))
 })
 
+test('SIGTERM after the completed run.json write resolves atomically leaves an interrupted report on disk', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let completedRunWritten = false
+  harness.dependencies.writeNewFile = async (pathname, contents) => {
+    await writeNewFile(pathname, contents)
+    if (pathname.endsWith('/run.json') && !completedRunWritten) {
+      completedRunWritten = true
+      harness.signalSource.emit('SIGTERM')
+    }
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(completedRunWritten, true)
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.status, 'interrupted')
+  assert.equal(result.report.usable, false)
+  const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
+  assert.equal(emitted.status, 'interrupted')
+  assert.equal(emitted.usable, false)
+  assert.deepEqual(emitted.failure, result.report.failure)
+  assert.doesNotThrow(() => validateRunReport(emitted))
+})
+
 test('sample CLI wrapper passes parsed options to the external-only sampler and preserves its exit code', async () => {
   const calls = []
   const result = await sampleMain(
     [
-      '--app-bundle', 'src-tauri/target/release/bundle/macos/Clarus Music.app',
-      '--root-pid', '4101', '--fixture-directory', 'artifacts/perf/fixtures/current',
-      '--metadata', 'artifacts/perf/metadata/idle-r01.json', '--output', 'artifacts/perf/runs/idle-r01',
-      '--samples', '5', '--interval-ms', '250',
+      '--app-bundle',
+      'src-tauri/target/release/bundle/macos/Clarus Music.app',
+      '--root-pid',
+      '4101',
+      '--fixture-directory',
+      'artifacts/perf/fixtures/current',
+      '--metadata',
+      'artifacts/perf/metadata/idle-r01.json',
+      '--output',
+      'artifacts/perf/runs/idle-r01',
+      '--samples',
+      '5',
+      '--interval-ms',
+      '250',
     ],
     {
       sampler: async (options) => {

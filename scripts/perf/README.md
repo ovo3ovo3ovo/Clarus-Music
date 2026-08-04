@@ -55,7 +55,7 @@ The server verifies before listening, exposes only lock-listed filenames, suppor
 
 ## Measurement discipline
 
-Every before/after A/B pair must reuse the exact same fixture directory and its exact `fixtures.lock.json`. Regenerating fixtures or changing any locked file invalidates that comparison; start a new pair instead. Run verification immediately before each measurement session.
+Every before/after A/B pair must reuse the exact same fixture directory and its exact `fixtures.lock.json`. Regenerating or changing any locked file invalidates that comparison; start a new pair instead. The sampler retains no-follow identity and timestamp witnesses across numeric phases, so changing and then restoring bytes during a run also makes that run unusable. Run verification immediately before each measurement session.
 
 ## External sampler and versioned reports
 
@@ -106,7 +106,7 @@ The sampler's attribution and numeric collection use only these absolute macOS e
 
 Numeric phases are sequential: one `top` command takes `samples + 1` snapshots and the warmup snapshot is discarded; then every `footprint --format bytes -p PID` call runs sequentially; optional perturbing stacks run last for main and WebContent and remain raw-only. Per-process footprint peaks are never added together. Missing PIDs, parse drift, truncation, output limits, permission denial, timeout, or a signal stops scheduling and leaves the report unusable.
 
-Exit code `0` means a completed report, `2` is an input/preflight refusal, `3` is sampling, parsing, permission, target, or fixture drift failure, `130` is `SIGINT`, and `143` is `SIGTERM`.
+Exit code `0` means a completed report, `2` is an input/preflight refusal (including an unavailable required sampler tool), `3` is sampling, parsing, permission, target, or fixture drift failure, `130` is `SIGINT`, and `143` is `SIGTERM`.
 
 ## Cohort summaries
 
@@ -122,7 +122,7 @@ npm run perf:summarize -- \
   --output artifacts/perf/summaries/idle-runtime
 ```
 
-Supply 1–1000 distinct, no-follow regular v1 `run.json` inputs and one new strict child of `artifacts/perf/summaries`. Inputs must be usable completed reports with all normalized metrics. Duplicate run IDs/indexes, failed/interrupted reports, unsupported schema versions, missing metrics, and mixed cohorts are refused. A cohort identity is exactly the scenario, scenario class, normalized-controls hash, fixture-lock SHA-256, app executable SHA-256, git commit, and normalized role/metric/unit set. Fixture regeneration or a changed fixture lock creates a different cohort.
+Supply 1–1000 distinct, no-follow regular v1 `run.json` inputs that are strict realpath-contained children of canonical `artifacts/perf/runs`, plus one new strict child of `artifacts/perf/summaries`. External inputs and any symlink component within the repository are refused; legitimate symlinked ancestors outside the repository (such as `/tmp` to `/private/tmp`) remain valid. Inputs must be usable completed reports with the fixed canonical 17-descriptor normalized set. Duplicate run IDs/indexes, failed/interrupted reports, unsupported schema versions, missing metrics, and mixed cohorts are refused. A cohort identity is exactly the scenario, scenario class, normalized-controls hash, fixture-lock SHA-256, app executable SHA-256, git commit, and that canonical role/metric/unit set. Fixture regeneration or a changed fixture lock creates a different cohort.
 
 Each run contributes one median for each role/metric/unit; periodic samples are never pooled across runs. `summary.json` uses `$schema: "clarus.perf.summary"`; `summary.json`, `summary.csv`, and `summary.txt` retain unrounded values in machine output and render at most six significant digits for people (`NA` when unavailable). Statistics are median, nearest-rank p95, min/max/span, mean, sample standard deviation (`n - 1`), and CV. Runtime cohorts require at least 5 runs; startup cohorts require 10. Lower counts remain visible as `insufficient-n`, rather than becoming a performance conclusion.
 

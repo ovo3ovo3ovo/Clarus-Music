@@ -130,7 +130,11 @@ function assertExactKeys(value, keys, label) {
   }
 }
 
-function assertString(value, label, { maxLength = Number.MAX_SAFE_INTEGER, nullable = false } = {}) {
+function assertString(
+  value,
+  label,
+  { maxLength = Number.MAX_SAFE_INTEGER, nullable = false } = {},
+) {
   if (nullable && value === null) {
     return
   }
@@ -174,7 +178,10 @@ function assertTimestamp(value, label, { nullable = false } = {}) {
     return
   }
   assertString(value, label)
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) || Number.isNaN(Date.parse(value))) {
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) ||
+    Number.isNaN(Date.parse(value))
+  ) {
     fail(`${label} must be an ISO-8601 UTC millisecond timestamp`)
   }
 }
@@ -187,7 +194,9 @@ export function assertSafeRelativeArtifactPath(value, label = 'artifact path') {
     isAbsolute(value) ||
     posix.isAbsolute(value) ||
     win32.isAbsolute(value) ||
-    value.split('/').some((component) => component.length === 0 || component === '.' || component === '..')
+    value
+      .split('/')
+      .some((component) => component.length === 0 || component === '.' || component === '..')
   ) {
     fail(`${label} must be a safe relative path`)
   }
@@ -196,7 +205,11 @@ export function assertSafeRelativeArtifactPath(value, label = 'artifact path') {
 
 function assertAbsolutePath(value, label) {
   assertString(value, label)
-  if (!isAbsolute(value) || value.includes('\\') || value.split('/').some((component) => component === '..')) {
+  if (
+    !isAbsolute(value) ||
+    value.includes('\\') ||
+    value.split('/').some((component) => component === '..')
+  ) {
     fail(`${label} must be an absolute non-traversing path`)
   }
 }
@@ -289,7 +302,11 @@ export function normalizeControlsMetadata(value) {
 }
 
 function assertRequested(value) {
-  assertExactKeys(value, ['samples', 'intervalMs', 'stackDurationSeconds', 'stackIntervalMs'], 'run.requested')
+  assertExactKeys(
+    value,
+    ['samples', 'intervalMs', 'stackDurationSeconds', 'stackIntervalMs'],
+    'run.requested',
+  )
   assertSafeInteger(value.samples, 'run.requested.samples', { minimum: 5 })
   if (value.samples > 3600) {
     fail('run.requested.samples must be no greater than 3600')
@@ -301,7 +318,9 @@ function assertRequested(value) {
   if (value.samples * value.intervalMs > 3600000) {
     fail('run.requested samples × intervalMs must be no greater than 3600000')
   }
-  assertSafeInteger(value.stackDurationSeconds, 'run.requested.stackDurationSeconds', { minimum: 0 })
+  assertSafeInteger(value.stackDurationSeconds, 'run.requested.stackDurationSeconds', {
+    minimum: 0,
+  })
   if (value.stackDurationSeconds > 60) {
     fail('run.requested.stackDurationSeconds must be no greater than 60')
   }
@@ -326,7 +345,18 @@ function assertRoleMetricUnit(value, label) {
 export function validateMeasurement(value) {
   assertExactKeys(
     value,
-    ['sampleIndex', 'observedAt', 'phase', 'tool', 'role', 'pid', 'metric', 'unit', 'value', 'rawFile'],
+    [
+      'sampleIndex',
+      'observedAt',
+      'phase',
+      'tool',
+      'role',
+      'pid',
+      'metric',
+      'unit',
+      'value',
+      'rawFile',
+    ],
     'measurement',
   )
   assertSafeInteger(value.sampleIndex, 'measurement.sampleIndex', { minimum: 0 })
@@ -366,7 +396,16 @@ function assertFailure(value) {
 function assertRunIdentity(value) {
   assertExactKeys(
     value,
-    ['scenario', 'scenarioClass', 'runId', 'runIndex', 'requestedAt', 'startedAt', 'endedAt', 'requested'],
+    [
+      'scenario',
+      'scenarioClass',
+      'runId',
+      'runIndex',
+      'requestedAt',
+      'startedAt',
+      'endedAt',
+      'requested',
+    ],
     'run',
   )
   assertIdentifier(value.scenario, 'run.scenario')
@@ -433,7 +472,11 @@ function assertFixtureRole(value) {
   assertExactKeys(value, ['role', 'filename', 'byteLength', 'sha256'], 'fixture.roles entry')
   assertString(value.role, 'fixture.roles role', { maxLength: 256 })
   assertString(value.filename, 'fixture.roles filename', { maxLength: 256 })
-  if (value.filename.includes('/') || value.filename.includes('\\') || value.filename.includes('..')) {
+  if (
+    value.filename.includes('/') ||
+    value.filename.includes('\\') ||
+    value.filename.includes('..')
+  ) {
     fail('fixture.roles filename is unsafe')
   }
   assertSafeInteger(value.byteLength, 'fixture.roles byteLength', { minimum: 1 })
@@ -441,7 +484,11 @@ function assertFixtureRole(value) {
 }
 
 function assertFixture(value) {
-  assertExactKeys(value, ['directory', 'lockSha256', 'schemaVersion', 'recipeVersion', 'roles'], 'fixture')
+  assertExactKeys(
+    value,
+    ['directory', 'lockSha256', 'schemaVersion', 'recipeVersion', 'roles'],
+    'fixture',
+  )
   assertAbsolutePath(value.directory, 'fixture.directory')
   assertHash(value.lockSha256, 'fixture.lockSha256')
   assertSafeInteger(value.schemaVersion, 'fixture.schemaVersion', { minimum: 1 })
@@ -548,7 +595,11 @@ function assertAttribution(value) {
     selectedPids.add(process.pid)
   }
   for (const process of value.unselected) {
-    assertExactKeys(process, ['pid', 'ppid', 'start', 'path', 'realpath', 'reason'], 'attribution.unselected entry')
+    assertExactKeys(
+      process,
+      ['pid', 'ppid', 'start', 'path', 'realpath', 'reason'],
+      'attribution.unselected entry',
+    )
     assertSnapshotProcess(
       {
         pid: process.pid,
@@ -570,7 +621,11 @@ function assertTools(value) {
   const names = new Set()
   for (const tool of value) {
     assertExactKeys(tool, ['name', 'path', 'requested', 'available'], 'tools entry')
-    if (!['ps', 'lsappinfo', 'plutil', 'git', 'sw_vers', 'top', 'footprint', 'sample'].includes(tool.name)) {
+    if (
+      !['ps', 'lsappinfo', 'plutil', 'git', 'sw_vers', 'top', 'footprint', 'sample'].includes(
+        tool.name,
+      )
+    ) {
       fail('tools entry has an unsupported name')
     }
     assertAbsolutePath(tool.path, 'tools entry path')
@@ -587,12 +642,28 @@ function assertTools(value) {
 function assertCommand(value) {
   assertExactKeys(
     value,
-    ['phase', 'tool', 'argv', 'start', 'end', 'exit', 'signal', 'timeout', 'stdout', 'stderr', 'parse', 'perturbing'],
+    [
+      'phase',
+      'tool',
+      'argv',
+      'start',
+      'end',
+      'exit',
+      'signal',
+      'timeout',
+      'stdout',
+      'stderr',
+      'parse',
+      'perturbing',
+    ],
     'commands entry',
   )
   assertString(value.phase, 'commands phase', { maxLength: 128 })
   assertString(value.tool, 'commands tool', { maxLength: 128 })
-  if (!Array.isArray(value.argv) || value.argv.some((argument) => typeof argument !== 'string' || hasControlCharacters(argument))) {
+  if (
+    !Array.isArray(value.argv) ||
+    value.argv.some((argument) => typeof argument !== 'string' || hasControlCharacters(argument))
+  ) {
     fail('commands argv must be a string array without control characters')
   }
   assertTimestamp(value.start, 'commands start')
@@ -714,6 +785,15 @@ function descriptorKey(value) {
   return `${value.role}\u0000${value.metric}\u0000${value.unit}`
 }
 
+function assertCanonicalMeasurementDescriptorSet(descriptors, label) {
+  if (
+    descriptors.size !== REQUIRED_MEASUREMENT_DESCRIPTOR_KEYS.size ||
+    [...REQUIRED_MEASUREMENT_DESCRIPTOR_KEYS].some((descriptor) => !descriptors.has(descriptor))
+  ) {
+    fail(`${label} must exactly match the canonical fixed-plan measurement descriptor set`)
+  }
+}
+
 function assertSummaryCohort(value) {
   assertExactKeys(
     value,
@@ -758,6 +838,7 @@ function assertSummaryCohort(value) {
     seen.add(key)
     previous = key
   }
+  assertCanonicalMeasurementDescriptorSet(seen, 'summary cohort measurementSet')
   if (value.sourceStatistic !== 'per-run-median') {
     fail('summary cohort sourceStatistic must be per-run-median')
   }
@@ -843,17 +924,29 @@ function assertSummaryStatistic(value, descriptors, cohort) {
     fail('summary statistics range is inconsistent')
   }
   if (value.n === 1) {
-    if (value.sampleStandardDeviation !== null || value.coefficientOfVariationPercent !== null || value.cvStatus !== 'insufficient-n') {
+    if (
+      value.sampleStandardDeviation !== null ||
+      value.coefficientOfVariationPercent !== null ||
+      value.cvStatus !== 'insufficient-n'
+    ) {
       fail('summary singleton statistics must have unavailable SD and CV')
     }
   } else {
-    assertFiniteNumber(value.sampleStandardDeviation, 'summary statistics sampleStandardDeviation', {
-      minimum: 0,
-    })
-    if (value.cvStatus === 'ok') {
-      assertFiniteNumber(value.coefficientOfVariationPercent, 'summary statistics coefficientOfVariationPercent', {
+    assertFiniteNumber(
+      value.sampleStandardDeviation,
+      'summary statistics sampleStandardDeviation',
+      {
         minimum: 0,
-      })
+      },
+    )
+    if (value.cvStatus === 'ok') {
+      assertFiniteNumber(
+        value.coefficientOfVariationPercent,
+        'summary statistics coefficientOfVariationPercent',
+        {
+          minimum: 0,
+        },
+      )
     } else if (value.cvStatus === 'zero-mean') {
       if (value.coefficientOfVariationPercent !== null) {
         fail('summary zero-mean CV must be null')

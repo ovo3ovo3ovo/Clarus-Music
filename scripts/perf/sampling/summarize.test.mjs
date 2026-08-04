@@ -5,7 +5,11 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { parseSummarizeArguments } from './cli-support.mjs'
-import { canonicalSha256, normalizeControlsMetadata, validateSummaryReport } from './report-schema.mjs'
+import {
+  canonicalSha256,
+  normalizeControlsMetadata,
+  validateSummaryReport,
+} from './report-schema.mjs'
 import { buildCohortSummary, runSummarizer } from './summarize.mjs'
 
 const HASH = 'a'.repeat(64)
@@ -82,13 +86,18 @@ function makeRun({
       executableSha256,
       release: true,
     },
-    controls: { metadata, sha256: controls ?? canonicalSha256(normalizeControlsMetadata(metadata)) },
+    controls: {
+      metadata,
+      sha256: controls ?? canonicalSha256(normalizeControlsMetadata(metadata)),
+    },
     fixture: {
       directory: '/private/repo/artifacts/perf/fixtures/current',
       lockSha256,
       schemaVersion: 2,
       recipeVersion: '2.0.0',
-      roles: [{ role: 'tone-short-mp3', filename: 'tone-short-mp3.mp3', byteLength: 1, sha256: HASH }],
+      roles: [
+        { role: 'tone-short-mp3', filename: 'tone-short-mp3.mp3', byteLength: 1, sha256: HASH },
+      ],
     },
     host: {
       platform: 'darwin',
@@ -104,8 +113,12 @@ function makeRun({
       method: 'posix-descendant',
       rootPid: 101,
       coalition: { id: '1', asn: '0x1' },
-      preSnapshot: [{ pid: 101, ppid: 1, start: '1', path: '/private/app', realpath: '/private/app' }],
-      postSnapshot: [{ pid: 101, ppid: 1, start: '1', path: '/private/app', realpath: '/private/app' }],
+      preSnapshot: [
+        { pid: 101, ppid: 1, start: '1', path: '/private/app', realpath: '/private/app' },
+      ],
+      postSnapshot: [
+        { pid: 101, ppid: 1, start: '1', path: '/private/app', realpath: '/private/app' },
+      ],
       selected: [selected],
       unselected: [],
     },
@@ -199,9 +212,12 @@ async function setupRuns(runs) {
 
 test('summarize CLI requires distinct repeated no-equals inputs and a new output', () => {
   const parsed = parseSummarizeArguments([
-    '--input', 'artifacts/perf/runs/idle-r01/run.json',
-    '--input', 'artifacts/perf/runs/idle-r02/run.json',
-    '--output', 'artifacts/perf/summaries/idle',
+    '--input',
+    'artifacts/perf/runs/idle-r01/run.json',
+    '--input',
+    'artifacts/perf/runs/idle-r02/run.json',
+    '--output',
+    'artifacts/perf/summaries/idle',
   ])
   assert.equal(parsed.inputs.length, 2)
   assert.throws(
@@ -209,7 +225,10 @@ test('summarize CLI requires distinct repeated no-equals inputs and a new output
     /distinct/i,
   )
   assert.throws(() => parseSummarizeArguments(['--input=a', '--output', 'o']), /key=value/i)
-  assert.throws(() => parseSummarizeArguments(['--input', 'a', 'extra', '--output', 'o']), /positional/i)
+  assert.throws(
+    () => parseSummarizeArguments(['--input', 'a', 'extra', '--output', 'o']),
+    /positional/i,
+  )
   assert.throws(() => parseSummarizeArguments(['--input', 'a', '--output']), /requires a value/i)
 })
 
@@ -220,7 +239,9 @@ test('builds cohort statistics from one median per run and exposes incomplete ru
     makeRun({ runId: 'idle-r03', runIndex: 3, values: [3, 3] }),
     makeRun({ runId: 'idle-r04', runIndex: 4, values: [4, 4] }),
   ]
-  const report = buildCohortSummary(reports.map((value, index) => ({ value, pathname: `runs/idle-r0${index + 1}/run.json` })))
+  const report = buildCohortSummary(
+    reports.map((value, index) => ({ value, pathname: `runs/idle-r0${index + 1}/run.json` })),
+  )
   assert.equal(report.cohort.sourceStatistic, 'per-run-median')
   assert.equal(report.cohort.requiredRuns, 5)
   assert.equal(report.cohort.actualRuns, 4)
@@ -281,7 +302,10 @@ test('refuses a complete-sized cohort when every run omits a required descriptor
     { repositoryRoot: setup.repositoryRoot, roots: { summariesRoot: setup.summariesRoot } },
   )
   assert.equal(result.exitCode, 2)
-  assert.match(result.error?.message ?? '', /required.*descriptor|fixed-plan|total_physical_footprint/i)
+  assert.match(
+    result.error?.message ?? '',
+    /required.*descriptor|fixed-plan|total_physical_footprint/i,
+  )
 })
 
 test('writes schema-valid json/csv/txt for a complete cohort without pooling periodic samples', async (t) => {
@@ -306,8 +330,14 @@ test('writes schema-valid json/csv/txt for a complete cohort without pooling per
   assert.equal(report.compliance.status, 'ok')
   assert.equal(report.statistics[0].n, 5)
   assert.equal(report.statistics[0].median, 4)
-  assert.match(await readFile(join(output, 'summary.txt'), 'utf8'), /^MEASUREMENT INFRASTRUCTURE OUTPUT — NOT EVIDENCE OF PRODUCT IMPROVEMENT\./)
-  assert.match(await readFile(join(output, 'summary.csv'), 'utf8'), /^schema_version,scenario,scenario_class,/)
+  assert.match(
+    await readFile(join(output, 'summary.txt'), 'utf8'),
+    /^MEASUREMENT INFRASTRUCTURE OUTPUT — NOT EVIDENCE OF PRODUCT IMPROVEMENT\./,
+  )
+  assert.match(
+    await readFile(join(output, 'summary.csv'), 'utf8'),
+    /^schema_version,scenario,scenario_class,/,
+  )
 })
 
 test('rejects failed, duplicate, unsupported/missing, and mixed-cohort inputs without a conclusion', async (t) => {
@@ -317,7 +347,10 @@ test('rejects failed, duplicate, unsupported/missing, and mixed-cohort inputs wi
   t.after(() => rm(failedSetup.temporary, { recursive: true, force: true }))
   const failed = await runSummarizer(
     { inputs: failedSetup.inputs, output: join(failedSetup.summariesRoot, 'failed') },
-    { repositoryRoot: failedSetup.repositoryRoot, roots: { summariesRoot: failedSetup.summariesRoot } },
+    {
+      repositoryRoot: failedSetup.repositoryRoot,
+      roots: { summariesRoot: failedSetup.summariesRoot },
+    },
   )
   assert.equal(failed.exitCode, 2)
 
@@ -328,7 +361,10 @@ test('rejects failed, duplicate, unsupported/missing, and mixed-cohort inputs wi
   t.after(() => rm(mixedSetup.temporary, { recursive: true, force: true }))
   const mixed = await runSummarizer(
     { inputs: mixedSetup.inputs, output: join(mixedSetup.summariesRoot, 'mixed') },
-    { repositoryRoot: mixedSetup.repositoryRoot, roots: { summariesRoot: mixedSetup.summariesRoot } },
+    {
+      repositoryRoot: mixedSetup.repositoryRoot,
+      roots: { summariesRoot: mixedSetup.summariesRoot },
+    },
   )
   assert.equal(mixed.exitCode, 2)
 
@@ -339,7 +375,10 @@ test('rejects failed, duplicate, unsupported/missing, and mixed-cohort inputs wi
   t.after(() => rm(duplicateSetup.temporary, { recursive: true, force: true }))
   const duplicate = await runSummarizer(
     { inputs: duplicateSetup.inputs, output: join(duplicateSetup.summariesRoot, 'duplicate') },
-    { repositoryRoot: duplicateSetup.repositoryRoot, roots: { summariesRoot: duplicateSetup.summariesRoot } },
+    {
+      repositoryRoot: duplicateSetup.repositoryRoot,
+      roots: { summariesRoot: duplicateSetup.summariesRoot },
+    },
   )
   assert.equal(duplicate.exitCode, 2)
 
@@ -350,7 +389,10 @@ test('rejects failed, duplicate, unsupported/missing, and mixed-cohort inputs wi
   t.after(() => rm(missingSetup.temporary, { recursive: true, force: true }))
   const missing = await runSummarizer(
     { inputs: missingSetup.inputs, output: join(missingSetup.summariesRoot, 'missing') },
-    { repositoryRoot: missingSetup.repositoryRoot, roots: { summariesRoot: missingSetup.summariesRoot } },
+    {
+      repositoryRoot: missingSetup.repositoryRoot,
+      roots: { summariesRoot: missingSetup.summariesRoot },
+    },
   )
   assert.equal(missing.exitCode, 2)
 })
@@ -372,4 +414,71 @@ test('refuses symlinked inputs and traversal/existing summary outputs', async (t
     { repositoryRoot: setup.repositoryRoot, roots: { summariesRoot: setup.summariesRoot } },
   )
   assert.equal(existing.exitCode, 2)
+})
+
+test('refuses a run input outside the canonical artifacts/perf/runs root', async (t) => {
+  const setup = await setupRuns([makeRun({ runId: 'idle-r01', runIndex: 1 })])
+  t.after(() => rm(setup.temporary, { recursive: true, force: true }))
+  const externalDirectory = join(setup.temporary, 'external-run')
+  const externalInput = join(externalDirectory, 'run.json')
+  await mkdir(externalDirectory)
+  await writeFile(externalInput, JSON.stringify(makeRun({ runId: 'idle-r02', runIndex: 2 })))
+
+  const result = await runSummarizer(
+    { inputs: [externalInput], output: join(setup.summariesRoot, 'external-input') },
+    { repositoryRoot: setup.repositoryRoot, roots: { summariesRoot: setup.summariesRoot } },
+  )
+
+  assert.equal(result.exitCode, 2)
+  assert.match(result.error?.message ?? '', /runs|strict child|outside|canonical/i)
+})
+
+test('refuses a repository-internal parent-directory symlink escape for a run input', async (t) => {
+  const setup = await setupRuns([makeRun({ runId: 'idle-r01', runIndex: 1 })])
+  t.after(() => rm(setup.temporary, { recursive: true, force: true }))
+  const externalDirectory = join(setup.temporary, 'escaped-run')
+  await mkdir(externalDirectory)
+  await writeFile(
+    join(externalDirectory, 'run.json'),
+    JSON.stringify(makeRun({ runId: 'idle-r02', runIndex: 2 })),
+  )
+  const linkedDirectory = join(setup.runsRoot, 'linked-run')
+  await symlink(externalDirectory, linkedDirectory)
+
+  const result = await runSummarizer(
+    {
+      inputs: [join(linkedDirectory, 'run.json')],
+      output: join(setup.summariesRoot, 'symlink-escape'),
+    },
+    { repositoryRoot: setup.repositoryRoot, roots: { summariesRoot: setup.summariesRoot } },
+  )
+
+  assert.equal(result.exitCode, 2)
+  assert.match(result.error?.message ?? '', /symbolic link|runs|outside|canonical/i)
+})
+
+test('accepts a canonical run input through a symlinked ancestor outside the repository', async (t) => {
+  const setup = await setupRuns([makeRun({ runId: 'idle-r01', runIndex: 1 })])
+  t.after(() => rm(setup.temporary, { recursive: true, force: true }))
+  const outsideAncestorLink = join(setup.temporary, 'outside-ancestor-link')
+  await symlink(setup.temporary, outsideAncestorLink)
+  const inputThroughOutsideAncestor = join(
+    outsideAncestorLink,
+    'repo',
+    'artifacts',
+    'perf',
+    'runs',
+    'idle-r01',
+    'run.json',
+  )
+
+  const result = await runSummarizer(
+    {
+      inputs: [inputThroughOutsideAncestor],
+      output: join(setup.summariesRoot, 'outside-ancestor'),
+    },
+    { repositoryRoot: setup.repositoryRoot, roots: { summariesRoot: setup.summariesRoot } },
+  )
+
+  assert.equal(result.exitCode, 0)
 })

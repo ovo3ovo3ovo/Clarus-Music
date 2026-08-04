@@ -1,4 +1,5 @@
-import { basename, join, relative, resolve, sep } from 'node:path'
+import { lstat, realpath } from 'node:fs/promises'
+import { basename, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, URL } from 'node:url'
 
@@ -26,6 +27,84 @@ function refusal(message) {
   throw new PerfInputError(message)
 }
 
+function isStrictChild(root, candidate) {
+  const fromRoot = relative(root, candidate)
+  return (
+    fromRoot.length > 0 &&
+    fromRoot !== '..' &&
+    !fromRoot.startsWith(`..${sep}`) &&
+    !isAbsolute(fromRoot) &&
+    !win32.isAbsolute(fromRoot)
+  )
+}
+
+function isContainedPath(root, candidate) {
+  return candidate === root || isStrictChild(root, candidate)
+}
+
+function assertSafeSummarizerInputPath(pathname) {
+  if (
+    typeof pathname !== 'string' ||
+    pathname.length === 0 ||
+    pathname.includes('\0') ||
+    pathname.includes('\\') ||
+    pathname.split('/').some((component) => component === '..')
+  ) {
+    refusal('Summarizer input paths must be unambiguous paths without parent traversal')
+  }
+}
+
+async function assertNoRepositorySymlinkComponents(pathname, physicalRepositoryRoot) {
+  const components = resolve(pathname).split(sep).filter(Boolean)
+  let current = sep
+  for (const component of components) {
+    const parent = current
+    current = join(current, component)
+    let details
+    let physicalParent
+    try {
+      details = await lstat(current)
+      physicalParent = await realpath(parent)
+    } catch (error) {
+      refusal(`Unable to inspect summarizer input path ${pathname}: ${error.message}`)
+    }
+    if (isContainedPath(physicalRepositoryRoot, physicalParent) && details.isSymbolicLink()) {
+      refusal(
+        `Summarizer input ${pathname} must not traverse symbolic link components within the repository`,
+      )
+    }
+  }
+}
+
+async function resolveCanonicalRunInputPath(pathname, repositoryRoot) {
+  assertSafeSummarizerInputPath(pathname)
+  const candidate = resolve(repositoryRoot, pathname)
+  if (basename(candidate) !== 'run.json') {
+    refusal('Summarizer input paths must name run.json files')
+  }
+  const canonicalRunsRoot = resolve(repositoryRoot, 'artifacts', 'perf', 'runs')
+  let physicalRepositoryRoot
+  let physicalRunsRoot
+  let physicalInput
+  try {
+    physicalRepositoryRoot = await realpath(repositoryRoot)
+    physicalRunsRoot = await realpath(canonicalRunsRoot)
+    await assertNoRepositorySymlinkComponents(candidate, physicalRepositoryRoot)
+    physicalInput = await realpath(candidate)
+  } catch (error) {
+    if (error instanceof PerfInputError) {
+      throw error
+    }
+    refusal(`Unable to resolve summarizer input ${pathname}: ${error.message}`)
+  }
+  if (!isStrictChild(physicalRunsRoot, physicalInput)) {
+    refusal(
+      `Summarizer input ${pathname} must be a strict realpath-contained child of artifacts/perf/runs`,
+    )
+  }
+  return physicalInput
+}
+
 function descriptorKey(value) {
   return `${value.role}\u0000${value.metric}\u0000${value.unit}`
 }
@@ -43,7 +122,10 @@ function exactSet(values) {
 }
 
 function equalDescriptorSets(left, right) {
-  return left.length === right.length && left.every((entry, index) => descriptorKey(entry) === descriptorKey(right[index]))
+  return (
+    left.length === right.length &&
+    left.every((entry, index) => descriptorKey(entry) === descriptorKey(right[index]))
+  )
 }
 
 const REQUIRED_DESCRIPTOR_SET = exactSet(REQUIRED_MEASUREMENT_DESCRIPTORS)
@@ -53,9 +135,14 @@ function assertRequiredDescriptors(descriptors, pathname) {
     return
   }
   const actual = new Set(descriptors.map(descriptorKey))
-  const missing = REQUIRED_DESCRIPTOR_SET.filter((descriptor) => !actual.has(descriptorKey(descriptor)))
+  const missing = REQUIRED_DESCRIPTOR_SET.filter(
+    (descriptor) => !actual.has(descriptorKey(descriptor)),
+  )
   const unexpected = descriptors.filter(
-    (descriptor) => !REQUIRED_DESCRIPTOR_SET.some((required) => descriptorKey(required) === descriptorKey(descriptor)),
+    (descriptor) =>
+      !REQUIRED_DESCRIPTOR_SET.some(
+        (required) => descriptorKey(required) === descriptorKey(descriptor),
+      ),
   )
   const missingText = missing.map(descriptorKey).join(', ') || 'none'
   const unexpectedText = unexpected.map(descriptorKey).join(', ') || 'none'
@@ -84,7 +171,12 @@ function assertUsableCompletedRun(report, pathname) {
   } catch (error) {
     refusal(`Input ${pathname} is not a usable supported v1 run.json: ${error.message}`)
   }
-  if (report.schemaVersion !== 1 || report.status !== 'completed' || report.usable !== true || report.failure !== null) {
+  if (
+    report.schemaVersion !== 1 ||
+    report.status !== 'completed' ||
+    report.usable !== true ||
+    report.failure !== null
+  ) {
     refusal(`Input ${pathname} is not a usable completed v1 run.json`)
   }
   if (!Array.isArray(report.measurements) || report.measurements.length === 0) {
@@ -310,7 +402,9 @@ export function renderCohortText(report) {
   lines.push(`scenario: ${report.cohort.scenario}`)
   lines.push(`scenario_class: ${report.cohort.scenarioClass}`)
   lines.push(`source_statistic: ${report.cohort.sourceStatistic}`)
-  lines.push(`runs: ${report.cohort.actualRuns}/${report.cohort.requiredRuns} (${report.compliance.status})`)
+  lines.push(
+    `runs: ${report.cohort.actualRuns}/${report.cohort.requiredRuns} (${report.compliance.status})`,
+  )
   for (const statistic of report.statistics) {
     lines.push(
       `${statistic.role} ${statistic.metric} (${statistic.unit}): n=${statistic.n} median=${formatStatistic(statistic.median)} p95=${formatStatistic(statistic.p95)} min=${formatStatistic(statistic.min)} max=${formatStatistic(statistic.max)} span=${formatStatistic(statistic.span)} mean=${formatStatistic(statistic.mean)} sd=${formatStatistic(statistic.sampleStandardDeviation)} cv=${formatStatistic(statistic.coefficientOfVariationPercent)} (${statistic.cvStatus}; ${statistic.runtimeStatus})`,
@@ -332,21 +426,16 @@ export async function runSummarizer(options, dependencies = {}) {
     const uniquePaths = new Set()
     const entries = []
     for (const pathname of options.inputs) {
-      const resolvedPath = typeof pathname === 'string' ? resolve(pathname) : ''
-      if (
-        typeof pathname !== 'string' ||
-        pathname.length === 0 ||
-        basename(resolvedPath) !== 'run.json' ||
-        uniquePaths.has(resolvedPath)
-      ) {
+      const resolvedPath = await resolveCanonicalRunInputPath(pathname, repositoryRoot)
+      if (uniquePaths.has(resolvedPath)) {
         refusal('Summarizer input paths must be non-empty and distinct')
       }
       uniquePaths.add(resolvedPath)
-      const input = await readJsonNoFollow(pathname, {
-        label: `run input ${pathname}`,
+      const input = await readJsonNoFollow(resolvedPath, {
+        label: `run input ${resolvedPath}`,
         maxBytes: INPUT_MAX_BYTES,
       })
-      entries.push({ pathname, value: input.value })
+      entries.push({ pathname: resolvedPath, value: input.value })
     }
     const report = buildCohortSummary(entries, { repositoryRoot })
     const outputPath = await createNewStrictOutputDirectory(options.output, {
@@ -374,7 +463,8 @@ export async function main(argumentsList = process.argv.slice(2)) {
 
 if (
   process.argv[1] &&
-  fileURLToPath(import.meta.url) === fileURLToPath(new URL(process.argv[1], `file://${process.cwd()}/`))
+  fileURLToPath(import.meta.url) ===
+    fileURLToPath(new URL(process.argv[1], `file://${process.cwd()}/`))
 ) {
   main().catch((error) => {
     process.stderr.write(`Performance summarization refused: ${error.message}\n`)

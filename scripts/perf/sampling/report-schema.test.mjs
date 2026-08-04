@@ -140,8 +140,12 @@ function runReport(overrides = {}) {
       method: 'posix-descendant',
       rootPid: 12345,
       coalition: { id: '42', asn: '0x1' },
-      preSnapshot: [{ pid: 12345, ppid: 1, start: '123', path: '/private/app', realpath: '/private/app' }],
-      postSnapshot: [{ pid: 12345, ppid: 1, start: '123', path: '/private/app', realpath: '/private/app' }],
+      preSnapshot: [
+        { pid: 12345, ppid: 1, start: '123', path: '/private/app', realpath: '/private/app' },
+      ],
+      postSnapshot: [
+        { pid: 12345, ppid: 1, start: '123', path: '/private/app', realpath: '/private/app' },
+      ],
       selected: [
         { role: 'main', pid: 12345, start: '123', path: '/private/app', realpath: '/private/app' },
       ],
@@ -176,7 +180,8 @@ test('metadata accepts only the strict release measurement controls', () => {
     /unique/i,
   )
   assert.throws(
-    () => validateMetadata(metadata({ fixtureRoles: ['tone-long-mp3'] }), { fixtureRoles: new Set() }),
+    () =>
+      validateMetadata(metadata({ fixtureRoles: ['tone-long-mp3'] }), { fixtureRoles: new Set() }),
     /verified lock/i,
   )
 })
@@ -250,7 +255,35 @@ test('run reports require schema identity and status consistency', () => {
   assert.throws(() => validateRunReport({ ...failed, failure: null }), /failure/i)
 })
 
-test('summary reports validate cohort identity and ordered per-run medians', () => {
+function descriptorKey(descriptor) {
+  return `${descriptor.role}\u0000${descriptor.metric}\u0000${descriptor.unit}`
+}
+
+function orderedDescriptors(descriptors = REQUIRED_MEASUREMENT_DESCRIPTORS) {
+  return descriptors
+    .map((descriptor) => ({ ...descriptor }))
+    .sort((left, right) => {
+      const leftKey = descriptorKey(left)
+      const rightKey = descriptorKey(right)
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0
+    })
+}
+
+function summaryReport(descriptors = orderedDescriptors()) {
+  const statistic = (descriptor) => ({
+    ...descriptor,
+    n: 5,
+    median: 1,
+    p95: 1,
+    min: 1,
+    max: 1,
+    span: 0,
+    mean: 1,
+    sampleStandardDeviation: 0,
+    coefficientOfVariationPercent: 0,
+    cvStatus: 'ok',
+    runtimeStatus: 'ok',
+  })
   const report = {
     $schema: SUMMARY_SCHEMA,
     schemaVersion: SCHEMA_VERSION,
@@ -262,7 +295,7 @@ test('summary reports validate cohort identity and ordered per-run medians', () 
       fixtureLockSha256: HASH,
       appExecutableSha256: HASH,
       gitCommit: COMMIT,
-      measurementSet: [{ role: 'main', metric: 'cpu.percent', unit: 'percent' }],
+      measurementSet: descriptors,
       sourceStatistic: 'per-run-median',
       requiredRuns: 5,
       actualRuns: 5,
@@ -271,28 +304,16 @@ test('summary reports validate cohort identity and ordered per-run medians', () 
       runId: `idle-r0${index + 1}`,
       runIndex: index + 1,
       sourcePath: `runs/idle-r0${index + 1}/run.json`,
-      medians: [{ role: 'main', metric: 'cpu.percent', unit: 'percent', value: 1 }],
+      medians: descriptors.map((descriptor) => ({ ...descriptor, value: 1 })),
     })),
     compliance: { complete: true, requiredRuns: 5, actualRuns: 5, status: 'ok' },
-    statistics: [
-      {
-        role: 'main',
-        metric: 'cpu.percent',
-        unit: 'percent',
-        n: 5,
-        median: 1,
-        p95: 1,
-        min: 1,
-        max: 1,
-        span: 0,
-        mean: 1,
-        sampleStandardDeviation: 0,
-        coefficientOfVariationPercent: 0,
-        cvStatus: 'ok',
-        runtimeStatus: 'ok',
-      },
-    ],
+    statistics: descriptors.map(statistic),
   }
+  return report
+}
+
+test('summary reports require the canonical descriptor set across cohort, medians, and statistics', () => {
+  const report = summaryReport()
   assert.deepEqual(validateSummaryReport(report), report)
   assert.throws(() => validateSummaryReport({ ...report, schema: SUMMARY_SCHEMA }), /unknown/i)
   const missingSchema = { ...report }
@@ -309,5 +330,44 @@ test('summary reports validate cohort identity and ordered per-run medians', () 
         runs: [report.runs[0], report.runs[0], ...report.runs.slice(2)],
       }),
     /duplicate/i,
+  )
+
+  const missingDescriptorReport = summaryReport(orderedDescriptors().slice(1))
+  assert.throws(
+    () => validateSummaryReport(missingDescriptorReport),
+    /canonical|exact.*fixed.*descriptor|measurementSet/i,
+  )
+
+  const illegalCrossRoleDescriptor = {
+    role: 'process-total',
+    metric: 'cpu.percent',
+    unit: 'percent',
+  }
+  const extraDescriptorReport = summaryReport(
+    orderedDescriptors([...REQUIRED_MEASUREMENT_DESCRIPTORS, illegalCrossRoleDescriptor]),
+  )
+  assert.throws(
+    () => validateSummaryReport(extraDescriptorReport),
+    /canonical|exact.*fixed.*descriptor|measurementSet/i,
+  )
+
+  const missingMedianReport = summaryReport()
+  missingMedianReport.runs = missingMedianReport.runs.map((run) => ({
+    ...run,
+    medians: run.medians.slice(1),
+  }))
+  assert.throws(() => validateSummaryReport(missingMedianReport), /medians.*measurementSet/i)
+
+  const unexpectedStatisticReport = summaryReport()
+  unexpectedStatisticReport.statistics = [
+    ...unexpectedStatisticReport.statistics.slice(0, -1),
+    {
+      ...unexpectedStatisticReport.statistics.at(-1),
+      ...illegalCrossRoleDescriptor,
+    },
+  ]
+  assert.throws(
+    () => validateSummaryReport(unexpectedStatisticReport),
+    /statistics.*cohort measurementSet/i,
   )
 })

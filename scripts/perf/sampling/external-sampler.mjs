@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
-import { mkdir } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { totalmem, cpus } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
@@ -133,7 +134,11 @@ function normalizeOutputLimits(value) {
   const limits = { ...OUTPUT_LIMIT_BYTES, ...(value ?? {}) }
   for (const [name, limit] of Object.entries(limits)) {
     if (!Number.isSafeInteger(limit) || limit < 1) {
-      samplingError('OUTPUT_LIMIT_INVALID', 'preflight', `${name} output limit must be a positive safe integer`)
+      samplingError(
+        'OUTPUT_LIMIT_INVALID',
+        'preflight',
+        `${name} output limit must be a positive safe integer`,
+      )
     }
   }
   return limits
@@ -142,7 +147,11 @@ function normalizeOutputLimits(value) {
 function normalizeTerminationGraceMs(value) {
   const graceMs = value ?? TERMINATION_GRACE_MS
   if (!Number.isSafeInteger(graceMs) || graceMs < 0) {
-    samplingError('TERMINATION_GRACE_INVALID', 'preflight', 'termination grace must be a nonnegative safe integer')
+    samplingError(
+      'TERMINATION_GRACE_INVALID',
+      'preflight',
+      'termination grace must be a nonnegative safe integer',
+    )
   }
   return graceMs
 }
@@ -153,7 +162,10 @@ function createBoundedOutputCollector(maximum) {
   return {
     append(value, totalRemaining) {
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-      const retainedLength = Math.max(0, Math.min(chunk.byteLength, maximum - byteLength, totalRemaining))
+      const retainedLength = Math.max(
+        0,
+        Math.min(chunk.byteLength, maximum - byteLength, totalRemaining),
+      )
       if (retainedLength > 0) {
         chunks.push(Buffer.from(chunk.subarray(0, retainedLength)))
         byteLength += retainedLength
@@ -418,7 +430,11 @@ function normalizeTopCpu(value) {
 }
 
 export function parseTopOutput(output, { pids } = {}) {
-  if (!Array.isArray(pids) || pids.length === 0 || pids.some((pid) => !Number.isSafeInteger(pid) || pid < 2)) {
+  if (
+    !Array.isArray(pids) ||
+    pids.length === 0 ||
+    pids.some((pid) => !Number.isSafeInteger(pid) || pid < 2)
+  ) {
     samplingError('PARSE_FAILURE', 'top', 'top parser requires fixed safe PIDs')
   }
   const text = String(output)
@@ -496,7 +512,11 @@ export function parseFootprintOutput(output) {
     const maximum = /^\s*Physical\s+footprint\s*\(peak\):\s*([0-9,]+)(?:\s+bytes)?\s*$/i.exec(line)
     if (current) {
       if (footprint !== undefined) {
-        samplingError('PARSE_FAILURE', 'footprint', 'footprint output has duplicate physical footprint values')
+        samplingError(
+          'PARSE_FAILURE',
+          'footprint',
+          'footprint output has duplicate physical footprint values',
+        )
       }
       footprint = parseByteValue(current[1], 'physical footprint')
     }
@@ -508,7 +528,11 @@ export function parseFootprintOutput(output) {
     }
   }
   if (footprint === undefined || peak === undefined) {
-    samplingError('PARSE_FAILURE', 'footprint', 'footprint output is missing physical footprint or peak')
+    samplingError(
+      'PARSE_FAILURE',
+      'footprint',
+      'footprint output is missing physical footprint or peak',
+    )
   }
   return { physicalFootprintBytes: footprint, physicalFootprintPeakBytes: peak }
 }
@@ -583,7 +607,9 @@ export function renderRunSummary(report) {
     group.values.push(measurement.value)
     groups.set(key, group)
   }
-  for (const group of [...groups.values()].sort((left, right) => `${left.role}/${left.metric}`.localeCompare(`${right.role}/${right.metric}`))) {
+  for (const group of [...groups.values()].sort((left, right) =>
+    `${left.role}/${left.metric}`.localeCompare(`${right.role}/${right.metric}`),
+  )) {
     const statistics = computeStatistics(group.values, { scenarioClass: report.run.scenarioClass })
     lines.push(
       `${group.role} ${group.metric} (${group.unit}): n=${statistics.n} median=${formatStatistic(statistics.median)} p95=${formatStatistic(statistics.p95)} mean=${formatStatistic(statistics.mean)}`,
@@ -619,7 +645,9 @@ function fixtureFingerprint(verified, lockBytes) {
     directory: resolve(verified.directory),
     lockSha256: sha256(lockBytes),
     normalizedLockSha256: sha256(Buffer.from(canonicalJson(verified.lock), 'utf8')),
-    files: files.map((file) => `${file.role}\u0000${file.filename}\u0000${file.byteLength}\u0000${file.sha256}`),
+    files: files.map(
+      (file) => `${file.role}\u0000${file.filename}\u0000${file.byteLength}\u0000${file.sha256}`,
+    ),
   }
 }
 
@@ -631,6 +659,115 @@ function sameFixtureFingerprint(left, right) {
     left.files.length === right.files.length &&
     left.files.every((file, index) => file === right.files[index])
   )
+}
+
+function fixtureStatIdentity(stat) {
+  return {
+    ctime: typeof stat.ctimeNs === 'bigint' ? stat.ctimeNs : stat.ctimeMs,
+    dev: stat.dev,
+    ino: stat.ino,
+    mtime: typeof stat.mtimeNs === 'bigint' ? stat.mtimeNs : stat.mtimeMs,
+    size: stat.size,
+  }
+}
+
+function sameFixtureStatIdentity(left, right) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.ctime === right.ctime &&
+    left.mtime === right.mtime
+  )
+}
+
+async function retainFixtureIntegrityGuard(verified) {
+  const paths = [
+    { label: 'fixture lock', pathname: join(verified.directory, 'fixtures.lock.json') },
+    ...normalizeFixtureRoles(verified.lock).map((fixture) => ({
+      label: `fixture file ${fixture.filename}`,
+      pathname: join(verified.directory, fixture.filename),
+    })),
+  ]
+  const witnesses = []
+  try {
+    for (const { label, pathname } of paths) {
+      const before = await lstat(pathname, { bigint: true })
+      if (before.isSymbolicLink() || !before.isFile()) {
+        samplingError('FIXTURE_DRIFT', 'fixture', `${label} is no longer a regular no-follow file`)
+      }
+      const handle = await open(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+      try {
+        const opened = await handle.stat({ bigint: true })
+        if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+          samplingError(
+            'FIXTURE_DRIFT',
+            'fixture',
+            `${label} changed while its integrity witness opened`,
+          )
+        }
+        witnesses.push({
+          baseline: fixtureStatIdentity(opened),
+          handle,
+          label,
+          pathname,
+        })
+      } catch (error) {
+        await handle.close().catch(() => {})
+        throw error
+      }
+    }
+  } catch (error) {
+    await Promise.all(witnesses.map(({ handle }) => handle.close().catch(() => {})))
+    if (error instanceof SamplingError) {
+      throw error
+    }
+    samplingError(
+      'FIXTURE_DRIFT',
+      'fixture',
+      `could not retain fixture integrity witnesses: ${safeErrorMessage(error)}`,
+      error,
+    )
+  }
+
+  let closed = false
+  return {
+    async assertUnchanged(phase) {
+      for (const witness of witnesses) {
+        let opened
+        let current
+        try {
+          opened = await witness.handle.stat({ bigint: true })
+          current = await lstat(witness.pathname, { bigint: true })
+        } catch (error) {
+          samplingError(
+            'FIXTURE_DRIFT',
+            'fixture',
+            `${witness.label} could not be verified after ${phase}: ${safeErrorMessage(error)}`,
+            error,
+          )
+        }
+        if (
+          current.isSymbolicLink() ||
+          !current.isFile() ||
+          !sameFixtureStatIdentity(witness.baseline, fixtureStatIdentity(opened)) ||
+          !sameFixtureStatIdentity(witness.baseline, fixtureStatIdentity(current))
+        ) {
+          samplingError(
+            'FIXTURE_DRIFT',
+            'fixture',
+            `${witness.label} changed during ${phase} sampling`,
+          )
+        }
+      }
+    },
+    async close() {
+      if (!closed) {
+        closed = true
+        await Promise.all(witnesses.map(({ handle }) => handle.close().catch(() => {})))
+      }
+    },
+  }
 }
 
 function safeErrorMessage(error) {
@@ -742,9 +879,7 @@ function failureMetadata(state) {
     return state.metadata
   }
   const fixtureRoles =
-    state.fixture?.roles?.length > 0
-      ? state.fixture.roles.map((role) => role.role)
-      : [FAILURE_ROLE]
+    state.fixture?.roles?.length > 0 ? state.fixture.roles.map((role) => role.role) : [FAILURE_ROLE]
   return {
     scenario: 'failure',
     scenarioClass: 'runtime',
@@ -920,6 +1055,7 @@ export async function runExternalSampler(options, dependencies = {}) {
   const activeChildren = new Set()
   const signalState = { signal: null }
   const outputLimits = normalizeOutputLimits(dependencies.outputLimits)
+  const writeArtifact = dependencies.writeNewFile ?? writeNewFile
   let retainedToolOutputBytes = 0
   const state = {
     requestedAt: timestampNow(now),
@@ -945,6 +1081,8 @@ export async function runExternalSampler(options, dependencies = {}) {
   let rawDirectory
   let fixtureBefore
   let fixtureVerifierClose
+  let fixtureIntegrityGuard
+  let completedRunContents
   let disposed = false
   const removeSignalListeners = () => {
     if (!disposed && signalSource && typeof signalSource.off === 'function') {
@@ -979,13 +1117,66 @@ export async function runExternalSampler(options, dependencies = {}) {
       samplingError('OUTPUT_INVALID', 'output', `raw path would be overwritten: ${relativePath}`)
     }
     const bytes = asBuffer(contents)
-    await writeNewFile(join(outputPath, relativePath), bytes)
+    await writeArtifact(join(outputPath, relativePath), bytes)
     rawPaths.add(relativePath)
-    const record = { path: relativePath, purpose, byteLength: bytes.byteLength, sha256: sha256(bytes) }
+    const record = {
+      path: relativePath,
+      purpose,
+      byteLength: bytes.byteLength,
+      sha256: sha256(bytes),
+    }
     state.rawFiles.push(record)
     return record
   }
-  const executeTool = async (phase, tool, argv, rawStem, perturbing = false, parse = (value) => value) => {
+  const replaceCompletedRunReport = async (contents) => {
+    const runPath = join(outputPath, 'run.json')
+    const stagingPath = join(outputPath, '.run.json.interrupted')
+    let staged = false
+    try {
+      await writeArtifact(stagingPath, contents)
+      staged = true
+      const existing = await readNoFollowRegularFile(runPath, {
+        label: 'completed run report',
+        maxBytes: OUTPUT_LIMIT_BYTES.total,
+      })
+      if (!completedRunContents || !existing.equals(completedRunContents)) {
+        return false
+      }
+      await rename(stagingPath, runPath)
+      staged = false
+      return true
+    } catch {
+      return false
+    } finally {
+      if (staged) {
+        await unlink(stagingPath).catch(() => {})
+      }
+    }
+  }
+  const writeCompletedRunReport = async (report) => {
+    const contents = `${JSON.stringify(report, null, 2)}\n`
+    await writeArtifact(join(outputPath, 'run.json'), contents)
+    completedRunContents = Buffer.from(contents, 'utf8')
+  }
+  const writeFailureRunReport = async (report) => {
+    const contents = `${JSON.stringify(report, null, 2)}\n`
+    if (completedRunContents && (await replaceCompletedRunReport(contents))) {
+      return
+    }
+    try {
+      await writeArtifact(join(outputPath, 'run.json'), contents)
+    } catch {
+      // A best-effort failure report must never overwrite an unowned output.
+    }
+  }
+  const executeTool = async (
+    phase,
+    tool,
+    argv,
+    rawStem,
+    perturbing = false,
+    parse = (value) => value,
+  ) => {
     assertNotInterrupted()
     const path = TOOL_PATHS[tool]
     if (!path) {
@@ -1024,10 +1215,17 @@ export async function runExternalSampler(options, dependencies = {}) {
     } catch (error) {
       command.end = timestampNow(now)
       command.parse.message = safeErrorMessage(error)
-      if (/permission denied|operation not permitted|not permitted|sip/i.test(safeErrorMessage(error))) {
+      if (
+        /permission denied|operation not permitted|not permitted|sip/i.test(safeErrorMessage(error))
+      ) {
         samplingError('PERMISSION_DENIED', phase, `${tool} permission was denied`, error)
       }
-      samplingError('TOOL_ERROR', phase, `${tool} could not be started: ${safeErrorMessage(error)}`, error)
+      samplingError(
+        'TOOL_ERROR',
+        phase,
+        `${tool} could not be started: ${safeErrorMessage(error)}`,
+        error,
+      )
     }
     const stdout = asBuffer(result?.stdout)
     const stderr = asBuffer(result?.stderr)
@@ -1066,7 +1264,12 @@ export async function runExternalSampler(options, dependencies = {}) {
       if (error instanceof SamplingError) {
         throw error
       }
-      samplingError('PARSE_FAILURE', phase, `${tool} output could not be parsed: ${safeErrorMessage(error)}`, error)
+      samplingError(
+        'PARSE_FAILURE',
+        phase,
+        `${tool} output could not be parsed: ${safeErrorMessage(error)}`,
+        error,
+      )
     }
   }
   const closeFixture = async () => {
@@ -1074,6 +1277,12 @@ export async function runExternalSampler(options, dependencies = {}) {
       await Promise.resolve(fixtureVerifierClose()).catch(() => {})
     }
     fixtureVerifierClose = undefined
+  }
+  const closeFixtureIntegrityGuard = async () => {
+    if (fixtureIntegrityGuard) {
+      await fixtureIntegrityGuard.close()
+    }
+    fixtureIntegrityGuard = undefined
   }
   const fixtureToolRunner =
     dependencies.fixtureToolRunner ??
@@ -1088,11 +1297,23 @@ export async function runExternalSampler(options, dependencies = {}) {
         spawnProcess: dependencies.spawnProcess,
         terminationGraceMs: dependencies.terminationGraceMs,
       }))
-  const verifyFixtures = (verifier, directory) =>
-    verifier({ directory, activeChildren, run: fixtureToolRunner })
+  const verifyFixtures = async (verifier, directory) => {
+    assertNotInterrupted()
+    const verified = await verifier({ directory, activeChildren, run: fixtureToolRunner })
+    if (signalState.signal) {
+      await Promise.resolve(verified?.close?.()).catch(() => {})
+    }
+    assertNotInterrupted()
+    return verified
+  }
   const captureAttribution = async (baseline, label) => {
     if (dependencies.captureAttribution) {
-      return dependencies.captureAttribution({ rootPid: options.rootPid, bundle: state.bundle, baseline, label })
+      return dependencies.captureAttribution({
+        rootPid: options.rootPid,
+        bundle: state.bundle,
+        baseline,
+        label,
+      })
     }
     return captureMacosAttribution({
       rootPid: options.rootPid,
@@ -1100,15 +1321,30 @@ export async function runExternalSampler(options, dependencies = {}) {
       helperPaths: dependencies.helperPaths,
       runCommand: async (file, argv) => {
         const tool = Object.entries(TOOL_PATHS).find(([, path]) => path === file)?.[0]
-        if (!tool) samplingError('TOOL_REFUSED', 'attribution', `unexpected attribution tool ${file}`)
-        const entry = await executeTool('attribution', tool, argv, `${tool}-${state.commands.length}`)
-        return { stdout: entry.stdout.toString('utf8'), stderr: entry.stderr.toString('utf8'), exitCode: entry.exitCode }
+        if (!tool)
+          samplingError('TOOL_REFUSED', 'attribution', `unexpected attribution tool ${file}`)
+        const entry = await executeTool(
+          'attribution',
+          tool,
+          argv,
+          `${tool}-${state.commands.length}`,
+        )
+        return {
+          stdout: entry.stdout.toString('utf8'),
+          stderr: entry.stderr.toString('utf8'),
+          exitCode: entry.exitCode,
+        }
       },
     })
   }
   const revalidate = async (baseline, label) => {
     if (dependencies.revalidateAttribution) {
-      return dependencies.revalidateAttribution({ rootPid: options.rootPid, baseline, bundle: state.bundle, label })
+      return dependencies.revalidateAttribution({
+        rootPid: options.rootPid,
+        baseline,
+        bundle: state.bundle,
+        label,
+      })
     }
     const current = await captureAttribution(undefined, label)
     return compareAttributionIdentity(baseline, current)
@@ -1117,7 +1353,11 @@ export async function runExternalSampler(options, dependencies = {}) {
     if (!options || typeof options !== 'object') {
       throw new PerfInputError('Sampler options are required')
     }
-    if (dependencies.platform !== undefined ? dependencies.platform !== 'darwin' : process.platform !== 'darwin') {
+    if (
+      dependencies.platform !== undefined
+        ? dependencies.platform !== 'darwin'
+        : process.platform !== 'darwin'
+    ) {
       throw new PerfInputError('External sampling is supported only on macOS')
     }
     const metadataPath = await resolveStrictNoFollowChildPath(options.metadata, {
@@ -1148,6 +1388,7 @@ export async function runExternalSampler(options, dependencies = {}) {
     let unavailableTool
     for (const [name, path] of Object.entries(TOOL_PATHS)) {
       const present = await available(path)
+      assertNotInterrupted()
       availability.set(name, present === true)
       const requested = name !== 'sample' || options.stackDurationSeconds > 0
       if (requested && present !== true && !unavailableTool) {
@@ -1180,12 +1421,21 @@ export async function runExternalSampler(options, dependencies = {}) {
       expectedBundlePath: expectedReleaseBundlePath,
       runCommand: async (file, argv) => {
         const entry = await executeTool('bundle', 'plutil', argv, `plutil-${state.commands.length}`)
-        return { stdout: entry.stdout.toString('utf8'), stderr: entry.stderr.toString('utf8'), exitCode: entry.exitCode }
+        return {
+          stdout: entry.stdout.toString('utf8'),
+          stderr: entry.stderr.toString('utf8'),
+          exitCode: entry.exitCode,
+        }
       },
     })
+    assertNotInterrupted()
     const bundle = assertExpectedReleaseBundle(state.bundle)
     if (bundle.expectedBundlePath !== resolve(expectedBundlePath)) {
-      samplingError('BUNDLE_PATH', 'preflight', 'app bundle did not resolve exactly to this worktree release bundle')
+      samplingError(
+        'BUNDLE_PATH',
+        'preflight',
+        'app bundle did not resolve exactly to this worktree release bundle',
+      )
     }
     state.source = {
       repositoryRoot,
@@ -1221,37 +1471,40 @@ export async function runExternalSampler(options, dependencies = {}) {
       metadata: state.metadata,
       sha256: canonicalSha256(normalizeControlsMetadata(state.metadata)),
     }
-    const hostReader = dependencies.readHost ?? (async () => {
-      const productVersion = await executeTool(
-        'host',
-        'sw_vers',
-        ['-productVersion'],
-        `sw-vers-product-${state.commands.length}`,
-        false,
-        ({ stdout }) => stdout.toString('utf8').trim(),
-      )
-      const buildVersion = await executeTool(
-        'host',
-        'sw_vers',
-        ['-buildVersion'],
-        `sw-vers-build-${state.commands.length}`,
-        false,
-        ({ stdout }) => stdout.toString('utf8').trim(),
-      )
-      const host = defaultHost()
-      return {
-        ...host,
-        osVersion: productVersion.parsed || null,
-        osBuild: buildVersion.parsed || null,
-      }
-    })
+    const hostReader =
+      dependencies.readHost ??
+      (async () => {
+        const productVersion = await executeTool(
+          'host',
+          'sw_vers',
+          ['-productVersion'],
+          `sw-vers-product-${state.commands.length}`,
+          false,
+          ({ stdout }) => stdout.toString('utf8').trim(),
+        )
+        const buildVersion = await executeTool(
+          'host',
+          'sw_vers',
+          ['-buildVersion'],
+          `sw-vers-build-${state.commands.length}`,
+          false,
+          ({ stdout }) => stdout.toString('utf8').trim(),
+        )
+        const host = defaultHost()
+        return {
+          ...host,
+          osVersion: productVersion.parsed || null,
+          osBuild: buildVersion.parsed || null,
+        }
+      })
     state.host = await hostReader()
     const gitReader = dependencies.readGit
       ? dependencies.readGit
       : async () =>
           defaultReadGit({
             repositoryRoot,
-            run: async (_name, argv, label) => executeTool('source', 'git', argv, `${label}-${state.commands.length}`),
+            run: async (_name, argv, label) =>
+              executeTool('source', 'git', argv, `${label}-${state.commands.length}`),
           })
     const git = await gitReader()
     state.source.gitCommit = git.commit
@@ -1264,7 +1517,11 @@ export async function runExternalSampler(options, dependencies = {}) {
     const selectedByRole = new Map(state.attribution.selected.map((entry) => [entry.role, entry]))
     const numericRoles = ['main', 'web-content', 'gpu', 'networking']
     if (numericRoles.some((role) => !selectedByRole.has(role))) {
-      samplingError('ATTRIBUTION_INVALID', 'attribution', 'attribution did not select exactly the four numeric roles')
+      samplingError(
+        'ATTRIBUTION_INVALID',
+        'attribution',
+        'attribution did not select exactly the four numeric roles',
+      )
     }
     const fixedPids = numericRoles.map((role) => selectedByRole.get(role).pid)
     if (new Set(fixedPids).size !== fixedPids.length) {
@@ -1277,10 +1534,11 @@ export async function runExternalSampler(options, dependencies = {}) {
       { label: 'fixture lock before numeric sampling' },
     )
     const fixtureBeforeTop = fixtureFingerprint(verifiedBeforeTop, beforeTopLockBytes)
-    await closeFixture()
     if (!sameFixtureFingerprint(fixtureBefore, fixtureBeforeTop)) {
       samplingError('FIXTURE_DRIFT', 'fixture', 'fixture changed before numeric sampling')
     }
+    fixtureIntegrityGuard = await retainFixtureIntegrityGuard(verifiedBeforeTop)
+    await closeFixture()
     const top = await executeTool(
       'top',
       'top',
@@ -1298,8 +1556,13 @@ export async function runExternalSampler(options, dependencies = {}) {
       false,
       ({ stdout }) => parseTopOutput(stdout.toString('utf8'), { pids: fixedPids }),
     )
+    await fixtureIntegrityGuard.assertUnchanged('top')
     if (top.parsed.length !== options.samples + 1) {
-      samplingError('PARSE_FAILURE', 'top', `top must report exactly ${options.samples + 1} snapshots including warmup`)
+      samplingError(
+        'PARSE_FAILURE',
+        'top',
+        `top must report exactly ${options.samples + 1} snapshots including warmup`,
+      )
     }
     for (let index = 1; index < top.parsed.length; index += 1) {
       const observedAt = timestampNow(now)
@@ -1338,7 +1601,11 @@ export async function runExternalSampler(options, dependencies = {}) {
     const reselected = new Map(state.attribution.selected.map((entry) => [entry.role, entry]))
     for (const role of numericRoles) {
       if (!reselected.has(role) || reselected.get(role).pid !== selectedByRole.get(role).pid) {
-        samplingError('ATTRIBUTION_DRIFT', 'attribution', `${role} PID changed before footprint sampling`)
+        samplingError(
+          'ATTRIBUTION_DRIFT',
+          'attribution',
+          `${role} PID changed before footprint sampling`,
+        )
       }
     }
     for (let sampleIndex = 0; sampleIndex < options.samples; sampleIndex += 1) {
@@ -1358,7 +1625,11 @@ export async function runExternalSampler(options, dependencies = {}) {
         const observedAt = timestampNow(now)
         const values = footprint.parsed
         pointTotal += values.physicalFootprintBytes
-        totalSources.push({ pid, physicalFootprintBytes: values.physicalFootprintBytes, rawFile: footprint.stdoutPath })
+        totalSources.push({
+          pid,
+          physicalFootprintBytes: values.physicalFootprintBytes,
+          rawFile: footprint.stdoutPath,
+        })
         state.measurements.push(
           {
             sampleIndex,
@@ -1387,7 +1658,11 @@ export async function runExternalSampler(options, dependencies = {}) {
         )
       }
       const totalRawPath = `raw/footprint-${String(sampleIndex).padStart(3, '0')}-total.json`
-      await writeRaw(totalRawPath, 'footprint-point-total', `${canonicalJson({ sources: totalSources })}\n`)
+      await writeRaw(
+        totalRawPath,
+        'footprint-point-total',
+        `${canonicalJson({ sources: totalSources })}\n`,
+      )
       state.measurements.push({
         sampleIndex,
         observedAt: timestampNow(now),
@@ -1401,6 +1676,7 @@ export async function runExternalSampler(options, dependencies = {}) {
         rawFile: totalRawPath,
       })
     }
+    await fixtureIntegrityGuard.assertUnchanged('footprint')
     state.attribution = await revalidate(state.attribution, 'between-footprint-stack')
     if (options.stackDurationSeconds > 0) {
       for (const role of ['main', 'web-content']) {
@@ -1408,11 +1684,17 @@ export async function runExternalSampler(options, dependencies = {}) {
         await executeTool(
           'stack',
           'sample',
-          [String(pid), String(options.stackDurationSeconds), '-interval', String(options.stackIntervalMs)],
+          [
+            String(pid),
+            String(options.stackDurationSeconds),
+            '-interval',
+            String(options.stackIntervalMs),
+          ],
           `sample-${role}`,
           true,
         )
       }
+      await fixtureIntegrityGuard.assertUnchanged('stack')
     }
     const finalAttribution = await revalidate(state.attribution, 'after')
     state.attribution = {
@@ -1421,55 +1703,70 @@ export async function runExternalSampler(options, dependencies = {}) {
       postSnapshot: finalAttribution.postSnapshot,
     }
     assertNotInterrupted()
+    await fixtureIntegrityGuard.assertUnchanged('post-collection')
     const verifiedAfter = await verifyFixtures(verifier, options.fixtureDirectory)
     fixtureVerifierClose = verifiedAfter.close
-    const afterLockBytes = await readNoFollowRegularFile(join(verifiedAfter.directory, 'fixtures.lock.json'), {
-      label: 'fixture lock after sampling',
-    })
+    const afterLockBytes = await readNoFollowRegularFile(
+      join(verifiedAfter.directory, 'fixtures.lock.json'),
+      {
+        label: 'fixture lock after sampling',
+      },
+    )
     const fixtureAfter = fixtureFingerprint(verifiedAfter, afterLockBytes)
     await closeFixture()
     assertNotInterrupted()
     if (!sameFixtureFingerprint(fixtureBefore, fixtureAfter)) {
-      samplingError('FIXTURE_DRIFT', 'fixture', 'fixture directory, lock, bytes, or hashes changed during sampling')
+      samplingError(
+        'FIXTURE_DRIFT',
+        'fixture',
+        'fixture directory, lock, bytes, or hashes changed during sampling',
+      )
     }
     state.endedAt = timestampNow(now)
     assertNotInterrupted()
     const report = makeCompletedReport(state)
     validateRunReport(report)
     assertNotInterrupted()
-    await writeNewFile(join(outputPath, 'measurements.csv'), renderMeasurementsCsv({
-      runId: state.metadata.runId,
-      scenario: state.metadata.scenario,
-      runIndex: state.metadata.runIndex,
-      measurements: state.measurements,
-    }))
+    await writeArtifact(
+      join(outputPath, 'measurements.csv'),
+      renderMeasurementsCsv({
+        runId: state.metadata.runId,
+        scenario: state.metadata.scenario,
+        runIndex: state.metadata.runIndex,
+        measurements: state.measurements,
+      }),
+    )
     assertNotInterrupted()
-    await writeNewFile(join(outputPath, 'summary.txt'), renderRunSummary(report))
+    await writeArtifact(join(outputPath, 'summary.txt'), renderRunSummary(report))
     assertNotInterrupted()
-    await writeNewFile(join(outputPath, 'run.json'), `${JSON.stringify(report, null, 2)}\n`)
+    await writeCompletedRunReport(report)
     assertNotInterrupted()
     return { exitCode: 0, outputPath, report }
   } catch (error) {
     state.endedAt ??= timestampNow(now)
     await closeFixture()
-    const isInput = error instanceof PerfInputError
+    await closeFixtureIntegrityGuard()
+    const isInputOrPreflightRefusal =
+      error instanceof PerfInputError ||
+      (error instanceof SamplingError && error.phase === 'preflight')
     const signal = error instanceof InterruptedError ? error.signal : signalState.signal
     const status = signal ? 'interrupted' : 'failed'
-    const exitCode = signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : isInput ? 2 : 3
+    const exitCode =
+      signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : isInputOrPreflightRefusal ? 2 : 3
     const report = makeFailureReport(state, error, status)
     if (outputPath) {
-      try {
-        await writeNewFile(join(outputPath, 'run.json'), `${JSON.stringify(report, null, 2)}\n`)
-      } catch {
-        // Output was created exclusively; a best-effort failure report must never overwrite it.
-      }
+      await writeFailureRunReport(report)
     }
     return { exitCode, outputPath, report, error }
   } finally {
     try {
       await terminateToolChildren(activeChildren)
     } finally {
-      removeSignalListeners()
+      try {
+        await closeFixtureIntegrityGuard()
+      } finally {
+        removeSignalListeners()
+      }
     }
   }
 }
