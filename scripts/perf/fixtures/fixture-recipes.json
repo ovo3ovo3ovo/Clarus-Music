@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 2,
+  "generatorVersion": "2.0.0",
+  "recipes": [
+    {
+      "role": "tone-short-mp3",
+      "schemaVersion": 2,
+      "generatorVersion": "2.0.0",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "filename": "tone-short-mp3.mp3",
+      "durationSeconds": 12,
+      "codec": "mp3",
+      "mimeType": "audio/mpeg",
+      "sampleRateHz": 44100,
+      "channels": 2,
+      "expectedSeekMarkersSeconds": []
+    },
+    {
+      "role": "tone-long-mp3",
+      "schemaVersion": 2,
+      "generatorVersion": "2.0.0",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "filename": "tone-long-mp3.mp3",
+      "durationSeconds": 300,
+      "codec": "mp3",
+      "mimeType": "audio/mpeg",
+      "sampleRateHz": 44100,
+      "channels": 2,
+      "expectedSeekMarkersSeconds": []
+    },
+    {
+      "role": "tone-seek-mp3",
+      "schemaVersion": 2,
+      "generatorVersion": "2.0.0",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "filename": "tone-seek-mp3.mp3",
+      "durationSeconds": 120,
+      "codec": "mp3",
+      "mimeType": "audio/mpeg",
+      "sampleRateHz": 44100,
+      "channels": 2,
+      "expectedSeekMarkersSeconds": [0, 30, 60, 90]
+    },
+    {
+      "role": "tone-flac",
+      "schemaVersion": 2,
+      "generatorVersion": "2.0.0",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "filename": "tone-flac.flac",
+      "durationSeconds": 30,
+      "codec": "flac",
+      "mimeType": "audio/flac",
+      "sampleRateHz": 44100,
+      "channels": 2,
+      "expectedSeekMarkersSeconds": []
+    },
+    {
+      "role": "word-timed-yrc",
+      "schemaVersion": 2,
+      "generatorVersion": "2.0.0",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "filename": "word-timed-yrc.yrc",
+      "durationSeconds": 18,
+      "codec": "yrc",
+      "mimeType": "text/plain",
+      "expectedSeekMarkersSeconds": []
+    }
+  ]
+}
