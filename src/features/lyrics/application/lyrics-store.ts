@@ -40,6 +40,7 @@ export function createLyricsStore(
     const error = shallowRef<string | null>(null)
     const lyrics = shallowRef<TrackLyrics | null>(null)
     const mode = ref<LyricMode>('translation')
+    const scrollTop = ref(0)
     let controller: AbortController | null = null
 
     function displayedTrackId(): number | null {
@@ -90,11 +91,16 @@ export function createLyricsStore(
       mode.value = lyrics.value === null ? nextMode : availableLyricMode(lyrics.value, nextMode)
     }
 
+    function setScrollTop(value: number): void {
+      if (Number.isFinite(value)) scrollTop.value = Math.max(0, value)
+    }
+
     function dispose(): void {
       cancel('Lyrics store disposed')
       visible.value = false
       lyrics.value = null
       error.value = null
+      scrollTop.value = 0
     }
 
     watch(
@@ -104,15 +110,30 @@ export function createLyricsStore(
           cancel('No current track')
           lyrics.value = null
           error.value = null
+          scrollTop.value = 0
           return
         }
+        scrollTop.value = 0
         void load(trackId)
       },
       { immediate: true },
     )
     onScopeDispose(dispose)
 
-    return { visible, loading, error, lyrics, mode, open, close, toggle, switchMode, dispose }
+    return {
+      visible,
+      loading,
+      error,
+      lyrics,
+      mode,
+      scrollTop,
+      open,
+      close,
+      toggle,
+      switchMode,
+      setScrollTop,
+      dispose,
+    }
   })
 }
 

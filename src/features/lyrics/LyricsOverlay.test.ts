@@ -54,7 +54,11 @@ const mocks = vi.hoisted(() => ({
         { timeMs: 2_000, original: 'Second', translation: null, romanization: null },
       ],
     },
+    scrollTop: 0,
     close: vi.fn(),
+    setScrollTop: vi.fn((value: number) => {
+      mocks.lyrics.scrollTop = value
+    }),
     switchMode: vi.fn(),
   },
   settings: {
@@ -127,6 +131,7 @@ describe('LyricsOverlay', () => {
     mocks.player.progress = 1.1
     mocks.player.duration = 180
     mocks.lyrics.visible = true
+    mocks.lyrics.scrollTop = 0
     mocks.lyrics.mode = 'translation'
     mocks.settings.lyricsBackground = 'off'
     mocks.settings.showLyricsTranslation = true
@@ -192,6 +197,50 @@ describe('LyricsOverlay', () => {
     expect(root.querySelector('.lyrics-overlay > .volume-control')).not.toBeNull()
 
     app.unmount()
+  })
+
+  it('restores the lyric scroll anchor after the presentation is unmounted and mounted again', async () => {
+    mocks.lyrics.scrollTop = 321
+    const first = await mountOverlay()
+    const firstContainer = first.root.querySelector<HTMLElement>('.lyrics-container')!
+    await nextTick()
+    expect(firstContainer.scrollTop).toBe(321)
+
+    firstContainer.scrollTop = 654
+    first.app.unmount()
+    expect(mocks.lyrics.setScrollTop).toHaveBeenLastCalledWith(654)
+
+    const second = await mountOverlay()
+    const secondContainer = second.root.querySelector<HTMLElement>('.lyrics-container')!
+    await nextTick()
+    expect(secondContainer.scrollTop).toBe(654)
+    second.app.unmount()
+  })
+
+  it('does not keep a lyric animation frame loop alive while playback is paused', async () => {
+    const queued: FrameRequestCallback[] = []
+    let nextFrameId = 0
+    const originalRequestAnimationFrame = window.requestAnimationFrame
+    const originalCancelAnimationFrame = window.cancelAnimationFrame
+    window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      queued.push(callback)
+      nextFrameId += 1
+      return nextFrameId
+    }) as typeof window.requestAnimationFrame
+    window.cancelAnimationFrame = (() => undefined) as typeof window.cancelAnimationFrame
+
+    try {
+      const { app } = await mountOverlay()
+      await nextTick()
+      for (let index = 0; index < 10 && queued.length > 0; index += 1) {
+        queued.shift()?.(index * 16)
+      }
+      expect(queued).toHaveLength(0)
+      app.unmount()
+    } finally {
+      window.requestAnimationFrame = originalRequestAnimationFrame
+      window.cancelAnimationFrame = originalCancelAnimationFrame
+    }
   })
 
   it('keeps lyrics on real playback progress while scrubbing and seeks only when committed', async () => {

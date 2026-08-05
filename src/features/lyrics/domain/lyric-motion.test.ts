@@ -3,6 +3,7 @@ import {
   advanceScrollSpring,
   centeredScrollTarget,
   lineVisualState,
+  nearestLyricCenterIndex,
   usableWords,
   wordFillPercent,
 } from './lyric-motion'
@@ -29,6 +30,21 @@ describe('lyric motion', () => {
     expect(centeredScrollTarget(600, 2_000, 800, 80)).toBe(540)
     expect(centeredScrollTarget(600, 2_000, 0, 80)).toBe(0)
     expect(centeredScrollTarget(600, 2_000, 1_900, 80)).toBe(1_400)
+  })
+
+  it('finds the nearest cached lyric center without scanning every line', () => {
+    const centers = [
+      { index: 0, center: 100 },
+      { index: 1, center: 240 },
+      { index: 2, center: 390 },
+      { index: 3, center: 610 },
+    ]
+
+    expect(nearestLyricCenterIndex(centers, 20)).toBe(0)
+    expect(nearestLyricCenterIndex(centers, 300)).toBe(1)
+    expect(nearestLyricCenterIndex(centers, 500)).toBe(2)
+    expect(nearestLyricCenterIndex(centers, 900)).toBe(3)
+    expect(nearestLyricCenterIndex([], 300)).toBeNull()
   })
 
   it('derives depth hierarchy and word fill from distance and time', () => {

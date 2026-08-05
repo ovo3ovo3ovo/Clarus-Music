@@ -22,7 +22,7 @@
     <ToastHost />
     <AppDialogHost />
     <Transition name="lyrics-slide">
-      <LyricsOverlay v-show="lyricsStore.visible" />
+      <LyricsOverlay v-if="lyricsStore.visible" />
     </Transition>
   </div>
 </template>

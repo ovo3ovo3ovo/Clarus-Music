@@ -56,6 +56,19 @@ describe('lyrics store', () => {
     expect(lyrics.lyrics).toBe(translated)
   })
 
+  it('keeps the overlay scroll anchor while its presentation is unmounted', () => {
+    const lyrics = createLyricsStore(
+      { load: vi.fn(async () => translated) },
+      'lyricsScrollAnchorTest',
+      player,
+    )()
+
+    lyrics.setScrollTop(321)
+    lyrics.close()
+
+    expect(lyrics.scrollTop).toBe(321)
+  })
+
   it('cancels a previous song and prevents its stale result from winning', async () => {
     const first = deferred<TrackLyrics>()
     const second = deferred<TrackLyrics>()

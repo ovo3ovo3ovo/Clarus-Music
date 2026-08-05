@@ -11,12 +11,45 @@ export interface LineVisualState {
   readonly blurPx: number
 }
 
+export interface LyricCenter {
+  readonly index: number
+  readonly center: number
+}
+
 const MAX_FRAME_MS = 34
 const SPRING_STIFFNESS = 185
 const SPRING_DAMPING = 26
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
+}
+
+/**
+ * Returns the line whose cached content-space center is nearest to a viewport
+ * center. The caller maintains the centers in lyric order; this lookup stays
+ * O(log N) while the user scrolls instead of forcing one layout read per line.
+ */
+export function nearestLyricCenterIndex(
+  centers: readonly LyricCenter[],
+  target: number,
+): number | null {
+  if (centers.length === 0 || !Number.isFinite(target)) return null
+  let low = 0
+  let high = centers.length - 1
+  while (low <= high) {
+    const middle = low + Math.floor((high - low) / 2)
+    const center = centers[middle].center
+    if (center === target) return centers[middle].index
+    if (center < target) low = middle + 1
+    else high = middle - 1
+  }
+  const before = high >= 0 ? centers[high] : null
+  const after = low < centers.length ? centers[low] : null
+  if (!before) return after?.index ?? null
+  if (!after) return before.index
+  return Math.abs(before.center - target) <= Math.abs(after.center - target)
+    ? before.index
+    : after.index
 }
 
 /**
@@ -87,9 +120,7 @@ export function lineVisualState(
   const opacity = userScrolling
     ? clamp(1 - distance * 0.18, 0.24, 1)
     : clamp(1 - distance * 0.135, 0.16, 1)
-  const blurPx = userScrolling
-    ? clamp(distance * 0.92, 0, 4.8)
-    : clamp(distance * 1.15, 0, 6.5)
+  const blurPx = userScrolling ? clamp(distance * 0.92, 0, 4.8) : clamp(distance * 1.15, 0, 6.5)
   return { distance, opacity, blurPx }
 }
 

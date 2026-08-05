@@ -228,7 +228,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import CoverImage from '@/components/common/CoverImage.vue'
 import AppIcon from '@/components/common/AppIcon.vue'
@@ -244,10 +244,12 @@ import {
   advanceScrollSpring,
   centeredScrollTarget,
   lineVisualState,
+  nearestLyricCenterIndex,
   usableWords,
   wordFillPercent,
 } from './domain/lyric-motion'
 import { extractCoverGradient } from './infrastructure/cover-gradient'
+import type { LyricCenter } from './domain/lyric-motion'
 import type { LyricLine, LyricWord } from './domain/lyrics'
 
 const { t } = useI18n()
@@ -296,6 +298,7 @@ const hoveredLyricIndex = ref<number | null>(null)
 const manualFocusIndex = ref<number | null>(null)
 const reducedMotion = ref(false)
 const lyricLineElements = new Map<number, globalThis.HTMLElement>()
+let lyricLineCenters: LyricCenter[] = []
 const lyricWordElements = new Map<
   string,
   { readonly element: globalThis.HTMLElement; readonly lineIndex: number; readonly word: LyricWord }
@@ -304,7 +307,11 @@ const lyricWordElementsByLine = new Map<
   number,
   Map<
     string,
-    { readonly element: globalThis.HTMLElement; readonly lineIndex: number; readonly word: LyricWord }
+    {
+      readonly element: globalThis.HTMLElement
+      readonly lineIndex: number
+      readonly word: LyricWord
+    }
   >
 >()
 const usableWordsCache = new WeakMap<LyricLine, readonly LyricWord[]>()
@@ -445,6 +452,10 @@ function setLyricWordElement(lineIndex: number, wordIndex: number, element: unkn
 function clampScrollTop(value: number): number {
   const container = lyricsContainer.value
   if (!container) return Math.max(0, value)
+  // jsdom and a just-mounted browser node can report zero layout metrics
+  // before the lyric track has been laid out. Preserve the requested anchor;
+  // the browser will clamp it once real dimensions are available.
+  if (container.scrollHeight === 0) return Math.max(0, value)
   return Math.min(Math.max(0, value), Math.max(0, container.scrollHeight - container.clientHeight))
 }
 
@@ -464,24 +475,32 @@ function measureScrollTarget(index = activeIndex.value): number | null {
   return clampScrollTop(target)
 }
 
+function rebuildLyricLineCenters(): void {
+  const container = lyricsContainer.value
+  if (!container) {
+    lyricLineCenters = []
+    return
+  }
+  const containerBounds = container.getBoundingClientRect()
+  lyricLineCenters = [...lyricLineElements.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([index, line]) => {
+      const height = line.offsetHeight
+      const bounds = height > 0 ? null : line.getBoundingClientRect()
+      const center =
+        height > 0
+          ? line.offsetTop + height / 2
+          : container.scrollTop + bounds.top - containerBounds.top + bounds.height / 2
+      return { index, center }
+    })
+    .filter(({ center }) => Number.isFinite(center))
+}
+
 function findManualFocusIndex(): number | null {
   const container = lyricsContainer.value
   if (!container || lyricLineElements.size === 0) return null
-  const center = container.scrollTop + container.clientHeight / 2
-  const containerBounds = container.getBoundingClientRect()
-  let nearest: number | null = null
-  let nearestDistance = Number.POSITIVE_INFINITY
-  for (const [index, line] of lyricLineElements) {
-    const lineBounds = line.getBoundingClientRect()
-    const lineCenter =
-      container.scrollTop + lineBounds.top - containerBounds.top + lineBounds.height / 2
-    const distance = Math.abs(lineCenter - center)
-    if (distance < nearestDistance) {
-      nearest = index
-      nearestDistance = distance
-    }
-  }
-  return nearest
+  if (lyricLineCenters.length !== lyricLineElements.size) rebuildLyricLineCenters()
+  return nearestLyricCenterIndex(lyricLineCenters, container.scrollTop + container.clientHeight / 2)
 }
 
 function updateManualFocus(): void {
@@ -508,7 +527,9 @@ function scheduleScrollTarget(index = activeIndex.value): void {
     if (!Number.isFinite(scrollSpring.position)) {
       scrollSpring = { position: measuredNow, velocity: 0 }
     }
+    ensureLyricClock()
   }
+  ensureLyricClock()
   if (targetMeasureFrame !== null) return
   targetMeasureFrame = window.requestAnimationFrame(() => {
     targetMeasureFrame = null
@@ -519,6 +540,7 @@ function scheduleScrollTarget(index = activeIndex.value): void {
     if (!Number.isFinite(scrollSpring.position)) {
       scrollSpring = { position: measured, velocity: 0 }
     }
+    ensureLyricClock()
   })
 }
 
@@ -633,6 +655,7 @@ function clearLyricElementMaps(): void {
     wordProgressValues.delete(binding.element)
   }
   lyricLineElements.clear()
+  lyricLineCenters = []
   lyricWordElements.clear()
   lyricWordElementsByLine.clear()
   wordProgressIndex = -1
@@ -809,7 +832,7 @@ function currentLyricTimeMs(): number {
   return currentTime * 1_000
 }
 
-function syncLyricIndex(currentTimeMs = currentLyricTimeMs()): void {
+function syncLyricIndex(currentTimeMs = currentLyricTimeMs(), followActiveLine = true): void {
   const lines = lyricsStore.lyrics?.lines ?? []
   const nextIndex = activeLyricIndex(lines, currentTimeMs)
   if (nextIndex !== activeIndex.value) {
@@ -817,7 +840,7 @@ function syncLyricIndex(currentTimeMs = currentLyricTimeMs()): void {
     if (nextIndex < 0) {
       scrollTarget = null
       scrollTargetIndex = -1
-    } else {
+    } else if (followActiveLine) {
       scheduleScrollTarget(nextIndex)
     }
     updateWordProgress(currentTimeMs, true)
@@ -846,6 +869,7 @@ watch(
   () => lyricsStore.lyrics?.lines,
   () => {
     clearLyricElementMaps()
+    lyricsStore.setScrollTop(0)
     activeIndex.value = -1
     scrollTarget = null
     scrollTargetIndex = -1
@@ -857,7 +881,10 @@ watch(
       setContainerScrollTop(0)
     }
     void nextTick().then(() => {
-      if (lyricsStore.lyrics?.lines.length) syncLyricIndex()
+      if (lyricsStore.lyrics?.lines.length) {
+        rebuildLyricLineCenters()
+        syncLyricIndex()
+      }
     })
   },
   // Clear measurements before Vue replaces the line buttons so the new
@@ -872,12 +899,32 @@ function advanceLyricScroll(timestamp: number): void {
   const elapsed = lastFrameTimestamp === null ? 16 : timestamp - lastFrameTimestamp
   scrollSpring = advanceScrollSpring(scrollSpring, scrollTarget, elapsed, reducedMotion.value)
   const next = clampScrollTop(scrollSpring.position)
-  if (Math.abs(container.scrollTop - next) > 0.05) setContainerScrollTop(next)
+  if (Math.abs(container.scrollTop - next) > 0.05) {
+    setContainerScrollTop(next)
+  }
+  if (
+    Math.abs(scrollSpring.position - scrollTarget) <= 0.05 &&
+    Math.abs(scrollSpring.velocity) <= 0.2
+  ) {
+    scrollTarget = null
+  }
 }
 
 function stopLyricClock(): void {
   if (lyricAnimationFrame !== null) window.cancelAnimationFrame(lyricAnimationFrame)
   lyricAnimationFrame = null
+}
+
+function ensureLyricClock(): void {
+  if (
+    lyricAnimationFrame !== null ||
+    !lyricsStore.visible ||
+    document.hidden ||
+    (!player.playing && scrollTarget === null)
+  ) {
+    return
+  }
+  lyricAnimationFrame = window.requestAnimationFrame(tickLyricClock)
 }
 
 function tickLyricClock(timestamp: number): void {
@@ -889,11 +936,8 @@ function tickLyricClock(timestamp: number): void {
   // frame look like a zero-duration frame, freezing the spring at its initial
   // scrollTop even though a target has been measured.
   lastFrameTimestamp = timestamp
-  if (lyricsStore.visible && !document.hidden) {
-    lyricAnimationFrame = window.requestAnimationFrame(tickLyricClock)
-  } else {
-    lyricAnimationFrame = null
-  }
+  lyricAnimationFrame = null
+  ensureLyricClock()
 }
 
 function syncLyricClock(visible: boolean): void {
@@ -903,7 +947,7 @@ function syncLyricClock(visible: boolean): void {
     closeLyricMenu()
     return
   }
-  if (!document.hidden) lyricAnimationFrame = window.requestAnimationFrame(tickLyricClock)
+  ensureLyricClock()
 }
 
 function handleVisibilityChange(): void {
@@ -911,6 +955,20 @@ function handleVisibilityChange(): void {
 }
 
 watch(() => lyricsStore.visible, syncLyricClock, { immediate: true })
+
+watch(
+  () => player.playing,
+  (playing) => {
+    if (playing) ensureLyricClock()
+  },
+)
+
+watch(
+  () => player.progress,
+  () => {
+    if (lyricsStore.visible && !player.playing) syncLyricIndex()
+  },
+)
 
 function handleMotionPreferenceChange(event: globalThis.MediaQueryListEvent): void {
   reducedMotion.value = event.matches
@@ -932,12 +990,24 @@ function bindLyricsContainer(
   resizeObserver = null
   if (!container) return
   container.addEventListener('scroll', handleLyricsScroll, { passive: true })
-  scrollSpring = { position: container.scrollTop, velocity: 0 }
+  const restoredScrollTop = clampScrollTop(lyricsStore.scrollTop)
+  setContainerScrollTop(restoredScrollTop)
+  scrollSpring = { position: restoredScrollTop, velocity: 0 }
   if (typeof globalThis.ResizeObserver !== 'undefined') {
-    resizeObserver = new globalThis.ResizeObserver(() => scheduleScrollTarget())
+    resizeObserver = new globalThis.ResizeObserver(() => {
+      rebuildLyricLineCenters()
+      scheduleScrollTarget()
+    })
     resizeObserver.observe(container)
+    for (const line of lyricLineElements.values()) resizeObserver.observe(line)
   }
-  scheduleScrollTarget()
+  // A v-if mount must preserve the exact scroll anchor from the previous
+  // presentation. Initialise the active line without immediately snapping to
+  // it; normal playback-following resumes when the active line next changes.
+  const restored = lyricsStore.scrollTop > 0
+  rebuildLyricLineCenters()
+  syncLyricIndex(currentLyricTimeMs(), !restored)
+  if (!restored) scheduleScrollTarget()
 }
 
 watch(lyricsContainer, bindLyricsContainer, { flush: 'post' })
@@ -951,6 +1021,11 @@ onMounted(() => {
   document.addEventListener('pointerdown', handlePointerDown)
 })
 
+onBeforeUnmount(() => {
+  const container = lyricsContainer.value
+  if (container) lyricsStore.setScrollTop(container.scrollTop)
+})
+
 onUnmounted(() => {
   backgroundController?.abort('Lyrics overlay disposed')
   if (copyTimer !== null) window.clearTimeout(copyTimer)
@@ -961,6 +1036,7 @@ onUnmounted(() => {
   stopLyricClock()
   resizeObserver?.disconnect()
   resizeObserver = null
+  lyricLineCenters = []
   motionMediaQuery?.removeEventListener?.('change', handleMotionPreferenceChange)
   motionMediaQuery = null
   lyricsContainer.value?.removeEventListener('scroll', handleLyricsScroll)
@@ -1410,7 +1486,10 @@ onUnmounted(() => {
   opacity: var(--lyric-opacity);
   filter: blur(var(--lyric-blur));
   text-align: left;
-  will-change: opacity, filter;
+  // Keep compositor hints on the handful of lines that actually animate.
+  // Far/idle lines retain the same filter and opacity output without each
+  // becoming a long-lived graphics layer.
+  will-change: auto;
   transition:
     opacity 240ms ease,
     filter 260ms ease,
@@ -1486,16 +1565,25 @@ onUnmounted(() => {
   }
 
   &.is-near {
+    will-change: opacity, filter;
+
     .lyric-content > span {
       color: color-mix(in srgb, var(--color-text) 80%, transparent);
     }
   }
 
   &.is-far {
+    will-change: auto;
+
     .lyric-content > span {
       color: color-mix(in srgb, var(--color-text) 58%, transparent);
     }
   }
+}
+
+.lyric-line.highlight,
+.lyric-line.is-scroll-focus {
+  will-change: opacity, filter;
 }
 
 .lyrics-state {
