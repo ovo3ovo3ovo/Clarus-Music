@@ -127,6 +127,7 @@ describe('NativeCatalogGateway', () => {
     const cached = {
       kind: 'managed-url' as const,
       url: 'asset://localhost/song.mp3',
+      mimeType: 'audio/mpeg',
       release: vi.fn(),
     }
     const audioCache = cacheGateway({ lookup: vi.fn(async () => cached) })

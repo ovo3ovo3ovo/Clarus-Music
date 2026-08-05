@@ -76,7 +76,7 @@ npm run perf:sample -- \
   --stack-interval-ms 1
 ```
 
-All options are required except `--stack-duration-seconds` (default `0`, which disables stacks) and `--stack-interval-ms` (default `1`). The CLI rejects positional arguments, unknown or duplicate options, `--key=value`, missing values, unsafe output paths, and overwrites. The root PID is a decimal safe integer greater than 1; samples are 5–3600; interval is 250–60000 ms; `samples × interval-ms` is at most 3,600,000 ms; stack duration is 0–60 seconds; stack interval is 1–1000 ms.
+All options are required except `--stack-duration-seconds` (default `0`, which disables stacks) and `--stack-interval-ms` (default `1`). The CLI rejects positional arguments, unknown or duplicate options, `--key=value`, missing values, unsafe output paths, and overwrites. The root PID is a decimal safe integer greater than 1; samples are 5–3600; interval is a whole number of seconds from 1000–60000 ms (macOS `top -s` has integer-second semantics); `samples × interval-ms` is at most 3,600,000 ms; stack duration is 0–60 seconds; stack interval is 1–1000 ms.
 
 The metadata file is opened no-follow, must be a regular JSON file no larger than 16 KiB, and has exactly these controls:
 

@@ -90,6 +90,7 @@ describe('native audio cache boundary', () => {
     expect(source).toMatchObject({
       kind: 'managed-url',
       url: 'asset://localhost/%2Fcache%2Faudio-v1%2Fsong.mp3',
+      mimeType: 'audio/mpeg',
     })
     expect(invokeCommand).not.toHaveBeenCalledWith('read_audio_cache_bytes', expect.anything())
     expect(invokeCommand).not.toHaveBeenCalledWith('release_audio_cache_lease', expect.anything())

@@ -493,12 +493,13 @@ export function parseLsappinfoInfo(output, { fallbackPath, fallbackRealpath } = 
     fail('MALFORMED_LSAPPINFO', 'lsappinfo info must contain exactly one process record')
   }
   const record = { ...records[0] }
-  if (
-    typeof record.path === 'string' &&
-    !isAbsolute(record.path) &&
-    typeof fallbackPath === 'string' &&
-    isAbsolute(fallbackPath)
-  ) {
+  if (typeof record.path === 'string' && !isAbsolute(record.path)) {
+    if (typeof fallbackPath !== 'string' || !isAbsolute(fallbackPath)) {
+      fail('MALFORMED_LSAPPINFO', 'basename-only lsappinfo info requires an absolute ps fallback')
+    }
+    if (basename(record.path) !== basename(fallbackPath)) {
+      fail('EXECUTABLE_MISMATCH', 'basename-only lsappinfo info disagrees with the ps executable')
+    }
     record.path = fallbackPath
     record.realpath = fallbackRealpath ?? fallbackPath
   }
@@ -802,41 +803,76 @@ export async function captureMacosAttribution({
     try {
       effectiveHelperPaths[role] = await resolveRealpath(expectedPath)
     } catch {
-      effectiveHelperPaths[role] = expectedPath
+      fail('REALPATH_UNAVAILABLE', `could not resolve canonical ${role} helper path`)
     }
   }
+  const helperBasenames = new Set(
+    Object.values(effectiveHelperPaths).map((pathname) => basename(pathname)),
+  )
   for (const record of rawSnapshot.filter(({ pid, path }) => pid > 1 && path.startsWith('/'))) {
     let resolved
     try {
       resolved = await resolveRealpath(record.path)
     } catch {
+      if (record.pid === rootPid || helperBasenames.has(basename(record.path))) {
+        fail('REALPATH_UNAVAILABLE', `could not resolve attributed process ${record.pid}`)
+      }
+      // Unknown processes are never selected or sampled. Retain their raw
+      // executable path so a coalition member can still be reported as
+      // unselected even when its optional realpath evidence is unavailable.
       resolved = record.path
     }
     snapshot.push({ ...record, path: resolved, realpath: resolved })
   }
   const listed = await invoke(runCommand, '/usr/bin/lsappinfo', ['list'])
   const applications = parseLsappinfoApplications(String(listed?.stdout ?? ''))
+  const rootApplication = applications.find((record) => record.pid === rootPid)
+  const rootMembers = new Set(rootApplication?.coalition?.members ?? [])
   const infoByPid = new Map()
-  const helperBasenames = new Set(
-    Object.values(effectiveHelperPaths).map((pathname) => basename(pathname)),
-  )
-  const infoCandidates = snapshot.filter(
-    (process) => process.pid === rootPid || helperBasenames.has(basename(process.path)),
-  )
+  const infoCandidatePids = new Set([
+    rootPid,
+    ...snapshot
+      .filter((process) => helperBasenames.has(basename(process.path)))
+      .map((process) => process.pid),
+  ])
+  for (const pid of rootMembers) {
+    if (snapshot.some((process) => process.pid === pid)) {
+      infoCandidatePids.add(pid)
+    }
+  }
+  const infoCandidates = snapshot.filter((process) => infoCandidatePids.has(process.pid))
   for (const process of infoCandidates) {
     const inspected = await invoke(runCommand, '/usr/bin/lsappinfo', [
       'info',
       '-pid',
       String(process.pid),
     ])
-    const parsed = parseLsappinfoInfo(String(inspected?.stdout ?? ''), {
-      fallbackPath: process.path,
-      fallbackRealpath: process.realpath,
-    })
+    let parsed
+    try {
+      parsed = parseLsappinfoInfo(String(inspected?.stdout ?? ''), {
+        fallbackPath: process.path,
+        fallbackRealpath: process.realpath,
+      })
+    } catch (error) {
+      const isSelectedCandidate =
+        process.pid === rootPid || helperBasenames.has(basename(process.path))
+      if (isSelectedCandidate || !rootMembers.has(process.pid)) {
+        throw error
+      }
+      // Some system coalition members (notably AudioToolbox's
+      // SandboxHelper) are present in ps and in the root coalition but have
+      // no LaunchServices record. Preserve them as unsampled unknown members
+      // using the already-verified ps identity and coalition membership.
+      parsed = {
+        pid: process.pid,
+        path: process.path,
+        realpath: process.realpath,
+        bundleId: 'unknown',
+        coalition: rootApplication.coalition,
+      }
+    }
     infoByPid.set(process.pid, parsed)
   }
-  const rootApplication = applications.find((record) => record.pid === rootPid)
-  const rootMembers = new Set(rootApplication?.coalition?.members ?? [])
   const rootInfo = infoByPid.get(rootPid)
   if (rootInfo && rootMembers.size > 0) {
     for (const process of infoCandidates) {

@@ -28,6 +28,22 @@ function normalizedError(reason: unknown, fallback: string): Error {
   return new Error(typeof reason === 'string' && reason.length > 0 ? reason : fallback)
 }
 
+export function audioFormatForSource(source: AudioSource): string {
+  const mimeType = source.kind === 'bytes' || source.kind === 'managed-url' ? source.mimeType : null
+  switch (mimeType) {
+    case 'audio/flac':
+      return 'flac'
+    case 'audio/ogg':
+      return 'ogg'
+    case 'audio/webm':
+      return 'webm'
+    case 'audio/mp4':
+      return 'm4a'
+    default:
+      return 'mp3'
+  }
+}
+
 export class HowlerAudioEngine implements AudioEngine {
   private readonly listeners: ListenerRegistry = {
     state: new Set(),
@@ -83,16 +99,7 @@ export class HowlerAudioEngine implements AudioEngine {
     signal?.addEventListener('abort', forwardAbort, { once: true })
     this.setState('loading')
     const url = this.createSourceUrl(source)
-    this.sourceFormat =
-      source.kind === 'bytes' && source.mimeType === 'audio/flac'
-        ? 'flac'
-        : source.kind === 'bytes' && source.mimeType === 'audio/ogg'
-          ? 'ogg'
-          : source.kind === 'bytes' && source.mimeType === 'audio/webm'
-            ? 'webm'
-            : source.kind === 'bytes' && source.mimeType === 'audio/mp4'
-              ? 'm4a'
-              : 'mp3'
+    this.sourceFormat = audioFormatForSource(source)
 
     try {
       await new Promise<void>((resolve, reject) => {

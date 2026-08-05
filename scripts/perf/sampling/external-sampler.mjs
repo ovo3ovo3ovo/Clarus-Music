@@ -929,7 +929,7 @@ const FAILURE_BUNDLE_ID = 'com.ovo3ovo3ovo.clarusmusic'
 
 const DEFAULT_REQUESTED = Object.freeze({
   samples: 5,
-  intervalMs: 250,
+  intervalMs: 1000,
   stackDurationSeconds: 0,
   stackIntervalMs: 1,
 })
@@ -946,7 +946,8 @@ function requestedForReport(options) {
     candidate.samples >= 5 &&
     candidate.samples <= 3600 &&
     Number.isSafeInteger(candidate.intervalMs) &&
-    candidate.intervalMs >= 250 &&
+    candidate.intervalMs >= 1000 &&
+    candidate.intervalMs % 1000 === 0 &&
     candidate.intervalMs <= 60000 &&
     candidate.samples * candidate.intervalMs <= 3600000 &&
     Number.isSafeInteger(candidate.stackDurationSeconds) &&
@@ -1356,8 +1357,56 @@ export async function runExternalSampler(options, dependencies = {}) {
       )
     }
   }
-  const writeFailureRunReport = async (report) => {
+  const replaceOwnedRunReport = async (contents) => {
+    if ((await inspectRunReportOwnership()) !== 'owned') {
+      return false
+    }
+    const stagingPath = join(outputPath, `.run.json.${randomUUID()}.staging`)
+    const preparedPath = join(outputPath, `.run.json.${randomUUID()}.prepared`)
+    let staged = true
+    let prepared = false
+    try {
+      await writeArtifact(stagingPath, contents)
+      await renameArtifact(stagingPath, preparedPath)
+      staged = false
+      prepared = true
+      if ((await inspectRunReportOwnership()) !== 'owned') {
+        return false
+      }
+      // `link` is deliberately used for publication so a foreign report can
+      // never be overwritten. The owned completed inode is removed only after
+      // the ownership check immediately above; a concurrent foreign creator
+      // then causes the no-replace link to fail rather than being replaced.
+      await unlinkArtifact(runPath())
+      await linkArtifact(preparedPath, runPath())
+      runReportOwned = false
+      completedRunContents = null
+      return true
+    } catch (error) {
+      reportCleanupError ??= error
+      return false
+    } finally {
+      if (staged) {
+        try {
+          await unlinkArtifact(stagingPath)
+        } catch (error) {
+          if (error?.code !== 'ENOENT') reportCleanupError ??= error
+        }
+      }
+      if (prepared) {
+        try {
+          await unlinkArtifact(preparedPath)
+        } catch (error) {
+          if (error?.code !== 'ENOENT') reportCleanupError ??= error
+        }
+      }
+    }
+  }
+  const writeFailureRunReport = async (report, { replaceOwned = false } = {}) => {
     const contents = `${JSON.stringify(report, null, 2)}\n`
+    if (replaceOwned && runReportOwned) {
+      return replaceOwnedRunReport(contents)
+    }
     return commitRunReport(contents)
   }
   const executeTool = async (
@@ -1618,6 +1667,15 @@ export async function runExternalSampler(options, dependencies = {}) {
     ) {
       throw new PerfInputError('External sampling is supported only on macOS')
     }
+    if (
+      !Number.isSafeInteger(options.intervalMs) ||
+      options.intervalMs < 1000 ||
+      options.intervalMs % 1000 !== 0
+    ) {
+      throw new PerfInputError(
+        'External sampling requires --interval-ms to be a whole number of seconds (>= 1000ms)',
+      )
+    }
     const metadataPath = await resolveStrictNoFollowChildPath(options.metadata, {
       label: 'Metadata path',
       root: repositoryRoot,
@@ -1715,14 +1773,14 @@ export async function runExternalSampler(options, dependencies = {}) {
     }
 
     const verifier = dependencies.fixtureVerifier ?? verifyFixtureSet
-    const initialFixtureIntegrityGuard = retainInitialFixtureIntegrityGuard(
-      options.fixtureDirectory,
-    )
+    // Retain the synchronous guard before entering the asynchronous verifier
+    // and publish it to the outer lifecycle immediately. If verification
+    // rejects, the catch/finally path must still close every descriptor.
+    fixtureIntegrityGuard = retainInitialFixtureIntegrityGuard(options.fixtureDirectory)
     const verified = await verifyFixtures(verifier, options.fixtureDirectory)
     assertNotInterrupted()
     fixtureVerifierClose = verified.close
-    fixtureIntegrityGuard =
-      initialFixtureIntegrityGuard ?? retainFixtureIntegrityGuardSync(verified)
+    fixtureIntegrityGuard ??= retainFixtureIntegrityGuardSync(verified)
     assertNotInterrupted()
     fixtureBaselineVerified = true
     const lockPath = join(verified.directory, 'fixtures.lock.json')
@@ -1833,7 +1891,7 @@ export async function runExternalSampler(options, dependencies = {}) {
       '-l',
       String(options.samples + 1),
       '-s',
-      String(Math.max(1, Math.ceil(options.intervalMs / 1000))),
+      String(options.intervalMs / 1000),
       '-stats',
       'pid,cpu,threads',
       '-pid',
@@ -2046,8 +2104,17 @@ export async function runExternalSampler(options, dependencies = {}) {
       signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : isInputOrPreflightRefusal ? 2 : 3
     const report = makeFailureReport(state, error, status)
     if (outputPath) {
-      await writeFailureRunReport(report)
-      if (completedRunReport && (await inspectRunReportOwnership()) === 'owned') {
+      const failurePublished = await writeFailureRunReport(report, {
+        replaceOwned: Boolean(signal),
+      })
+      if (signal) {
+        return { exitCode, outputPath, report, error }
+      }
+      if (
+        !failurePublished &&
+        completedRunReport &&
+        (await inspectRunReportOwnership()) === 'owned'
+      ) {
         return {
           exitCode: 0,
           outputPath,

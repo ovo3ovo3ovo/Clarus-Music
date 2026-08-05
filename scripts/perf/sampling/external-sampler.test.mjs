@@ -232,7 +232,7 @@ async function createHarness({
     '--samples',
     '5',
     '--interval-ms',
-    '250',
+    '1000',
     '--stack-duration-seconds',
     '1',
     '--stack-interval-ms',
@@ -332,7 +332,7 @@ test('sample CLI rejects unknown, duplicate, positional, equals, invalid number,
     '--samples',
     '5',
     '--interval-ms',
-    '250',
+    '1000',
   ])
   assert.equal(valid.stackDurationSeconds, 0)
   assert.equal(valid.stackIntervalMs, 1)
@@ -379,6 +379,29 @@ test('sample CLI rejects unknown, duplicate, positional, equals, invalid number,
     () =>
       resolveStrictChildPath('../outside', { root: '/tmp/perf/runs', repositoryRoot: '/tmp/perf' }),
     /traversal|strict child/i,
+  )
+})
+
+test('sample CLI rejects subsecond top intervals that macOS cannot represent exactly', () => {
+  assert.throws(
+    () =>
+      parseSampleArguments([
+        '--app-bundle',
+        '/repo/Clarus Music.app',
+        '--root-pid',
+        '4101',
+        '--fixture-directory',
+        '/repo/fixtures',
+        '--metadata',
+        '/repo/metadata.json',
+        '--output',
+        '/repo/run',
+        '--samples',
+        '5',
+        '--interval-ms',
+        '250',
+      ]),
+    /1000|subsecond|interval/i,
   )
 })
 
@@ -1429,6 +1452,30 @@ test('a publish seam that throws after creating run.json is reconciled as comple
   assert.equal(emitted.usable, true)
 })
 
+test('a signal delivered after successful report publication leaves an interrupted report', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let published = false
+  harness.dependencies.link = async (fromPath, toPath) => {
+    await link(fromPath, toPath)
+    if (!published) {
+      published = true
+      harness.signalSource.emit('SIGTERM')
+    }
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(published, true)
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.status, 'interrupted')
+  assert.equal(result.report.usable, false)
+  const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
+  assert.equal(emitted.status, 'interrupted')
+  assert.equal(emitted.usable, false)
+  assert.doesNotThrow(() => validateRunReport(emitted))
+})
+
 test('a SIGTERM after the first report rename cannot publish a completed report', async (t) => {
   const harness = await createHarness()
   t.after(() => rm(harness.temporary, { recursive: true, force: true }))
@@ -1506,7 +1553,7 @@ test('sample CLI wrapper passes parsed options to the external-only sampler and 
       '--samples',
       '5',
       '--interval-ms',
-      '250',
+      '1000',
     ],
     {
       sampler: async (options) => {

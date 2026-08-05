@@ -22,7 +22,10 @@ function inputError(message, code) {
 }
 
 function assertArgumentList(argumentsList) {
-  if (!Array.isArray(argumentsList) || argumentsList.some((argument) => typeof argument !== 'string')) {
+  if (
+    !Array.isArray(argumentsList) ||
+    argumentsList.some((argument) => typeof argument !== 'string')
+  ) {
     inputError('CLI arguments must be strings')
   }
 }
@@ -104,11 +107,14 @@ export function parseSampleArguments(argumentsList) {
     maximum: 3600,
   })
   const intervalMs = parseDecimal(singleValue(values, '--interval-ms'), '--interval-ms', {
-    minimum: 250,
+    minimum: 1000,
     maximum: 60000,
   })
   if (samples * intervalMs > 3600000) {
     inputError('--samples × --interval-ms must be no greater than 3600000')
+  }
+  if (intervalMs % 1000 !== 0) {
+    inputError('--interval-ms must be a whole number of seconds on macOS')
   }
   const stackDurationSeconds = parseDecimal(
     singleValue(values, '--stack-duration-seconds', '0'),

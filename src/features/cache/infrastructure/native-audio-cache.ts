@@ -150,6 +150,7 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
       return {
         kind: 'managed-url',
         url,
+        mimeType: native.mimeType,
         release,
       }
     } catch (error) {

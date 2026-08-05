@@ -7,6 +7,7 @@ import {
   EXPECTED_BUNDLE_ID,
   assertExpectedReleaseBundle,
   attributeProcessTree,
+  captureMacosAttribution,
   parseLsappinfoApplications,
   parseLsappinfoInfo,
   parsePsSnapshot,
@@ -402,4 +403,135 @@ test('maps a basename-only WebContent info path to the verified ps executable', 
   )
   assert.equal(record.path, DEFAULT_HELPER_PATHS['web-content'])
   assert.equal(record.realpath, DEFAULT_HELPER_PATHS['web-content'])
+})
+
+test('captures every unknown member of the root LaunchServices coalition', async () => {
+  const root = processRecord({ pid: 4101, path: EXECUTABLE })
+  const web = processRecord({ pid: 4102, path: DEFAULT_HELPER_PATHS['web-content'] })
+  const gpu = processRecord({ pid: 4103, path: DEFAULT_HELPER_PATHS.gpu })
+  const networking = processRecord({ pid: 4104, path: DEFAULT_HELPER_PATHS.networking })
+  const audio = processRecord({ pid: 4105, path: '/usr/libexec/audio.SandboxHelper' })
+  const coalition = { id: '17', asn: '0x40000017' }
+  const records = [root, web, gpu, networking, audio]
+  const infoByPid = new Map([
+    [root.pid, infoRecord({ pid: root.pid, path: EXECUTABLE, bundleId: EXPECTED_BUNDLE_ID })],
+    [
+      web.pid,
+      infoRecord({ pid: web.pid, path: web.path, bundleId: 'com.apple.WebKit.WebContent' }),
+    ],
+    [gpu.pid, infoRecord({ pid: gpu.pid, path: gpu.path, bundleId: 'com.apple.WebKit.GPU' })],
+    [
+      networking.pid,
+      infoRecord({
+        pid: networking.pid,
+        path: networking.path,
+        bundleId: 'com.apple.WebKit.Networking',
+      }),
+    ],
+    [
+      audio.pid,
+      infoRecord({ pid: audio.pid, path: audio.path, bundleId: 'com.apple.audio.SandboxHelper' }),
+    ],
+  ])
+  const runCommand = async (executable, argv) => {
+    if (executable === '/bin/ps') {
+      return {
+        stdout: records
+          .map(({ pid, ppid, start, path }) => `${pid}\t${ppid}\t${start}\t${path}`)
+          .join('\n'),
+      }
+    }
+    if (argv[0] === 'list') {
+      return {
+        stdout: JSON.stringify([
+          {
+            pid: root.pid,
+            path: EXECUTABLE,
+            realpath: EXECUTABLE,
+            bundleId: EXPECTED_BUNDLE_ID,
+            coalition,
+            coalitionMembers: records.map(({ pid }) => pid),
+          },
+        ]),
+      }
+    }
+    const pid = Number(argv[2])
+    if (pid === audio.pid) return { stdout: 'bundleID=[ NULL ] executable path=[ NULL ] pid = ' }
+    return { stdout: JSON.stringify([infoByPid.get(pid)]) }
+  }
+  const result = await captureMacosAttribution({
+    rootPid: root.pid,
+    bundle: {
+      appBundlePath: BUNDLE,
+      expectedBundlePath: BUNDLE,
+      executablePath: EXECUTABLE,
+      executableRealpath: EXECUTABLE,
+      bundleId: EXPECTED_BUNDLE_ID,
+      bundleVersion: '0.1.0',
+    },
+    helperPaths: DEFAULT_HELPER_PATHS,
+    resolveRealpath: async (pathname) => pathname,
+    // captureMacosAttribution reads the fixed ps tabular form.
+    runCommand,
+  })
+  assert.deepEqual(
+    result.unselected.map(({ pid }) => pid),
+    [audio.pid],
+  )
+})
+
+test('fails closed when realpath resolution of the root process fails', async () => {
+  await assert.rejects(
+    captureMacosAttribution({
+      rootPid: 4101,
+      bundle: {
+        appBundlePath: BUNDLE,
+        expectedBundlePath: BUNDLE,
+        executablePath: EXECUTABLE,
+        executableRealpath: EXECUTABLE,
+        bundleId: EXPECTED_BUNDLE_ID,
+        bundleVersion: '0.1.0',
+      },
+      helperPaths: DEFAULT_HELPER_PATHS,
+      resolveRealpath: async (pathname) => {
+        if (pathname === EXECUTABLE) throw new Error('realpath unavailable')
+        return pathname
+      },
+      runCommand: async (executable, argv) => {
+        if (executable === '/bin/ps') {
+          return { stdout: `4101\t1\tstart-4101\t${EXECUTABLE}` }
+        }
+        if (argv[0] === 'list') {
+          return {
+            stdout: JSON.stringify([
+              {
+                pid: 4101,
+                path: EXECUTABLE,
+                realpath: EXECUTABLE,
+                bundleId: EXPECTED_BUNDLE_ID,
+                coalition: COALITION,
+                coalitionMembers: [4101],
+              },
+            ]),
+          }
+        }
+        return { stdout: JSON.stringify([]) }
+      },
+    }),
+    /realpath/i,
+  )
+})
+
+test('rejects arbitrary basename-only LaunchServices paths instead of trusting ps fallback', () => {
+  assert.throws(
+    () =>
+      parseLsappinfoInfo(
+        'pid=4102 bundleID="com.apple.WebKit.WebContent" executable path="evil-name" ASN:0x17',
+        {
+          fallbackPath: DEFAULT_HELPER_PATHS['web-content'],
+          fallbackRealpath: DEFAULT_HELPER_PATHS['web-content'],
+        },
+      ),
+    /basename|path/i,
+  )
 })
