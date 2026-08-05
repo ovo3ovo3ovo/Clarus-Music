@@ -107,6 +107,26 @@ describe('Howler source format selection', () => {
     engine.dispose()
   })
 
+  it('keeps an adopted managed lease until replacement or disposal', async () => {
+    const release = vi.fn()
+    const controller = new AbortController()
+    const engine = new HowlerAudioEngine()
+    await engine.load(
+      {
+        kind: 'managed-url',
+        url: 'asset://localhost/cache/song.mp3',
+        mimeType: 'audio/mpeg',
+        release,
+      },
+      controller.signal,
+    )
+
+    controller.abort('navigation superseded')
+    expect(release).not.toHaveBeenCalled()
+    engine.dispose()
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it.each([
     ['audio/flac', 'flac'],
     ['audio/mp4', 'm4a'],

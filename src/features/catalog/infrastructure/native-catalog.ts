@@ -29,28 +29,6 @@ import type {
   SearchType,
 } from '../domain/catalog'
 
-function abortError(reason?: unknown): DOMException {
-  return new DOMException(String(reason ?? 'Audio source request aborted'), 'AbortError')
-}
-
-function releaseOnAbort(source: AudioSource, signal?: AbortSignal): AudioSource {
-  if (signal === undefined || source.kind !== 'managed-url') return source
-
-  let released = false
-  const release = (): void => {
-    if (released) return
-    released = true
-    signal.removeEventListener('abort', release)
-    source.release()
-  }
-  if (signal.aborted) {
-    release()
-    throw abortError(signal.reason)
-  }
-  signal.addEventListener('abort', release, { once: true })
-  return { ...source, release }
-}
-
 function stringArrayField(value: UnknownRecord, key: string): readonly string[] | null {
   const field = value[key]
   return Array.isArray(field) && field.every((item) => typeof item === 'string') ? field : null
@@ -360,7 +338,7 @@ export class NativeCatalogGateway implements CatalogGateway {
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') throw error
     }
-    if (cached !== null) return releaseOnAbort(cached, signal)
+    if (cached !== null) return cached
     const native = await this.cancellableInvoke<unknown>(
       'resolve_stream_url',
       { trackId, quality: playbackQuality },
@@ -376,11 +354,11 @@ export class NativeCatalogGateway implements CatalogGateway {
         },
         signal,
       )
-      if (prepared !== null) return releaseOnAbort(prepared, signal)
+      if (prepared !== null) return prepared
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') throw error
     }
-    return releaseOnAbort(resolved.source, signal)
+    return resolved.source
   }
 
   private async cancellableInvoke<T>(

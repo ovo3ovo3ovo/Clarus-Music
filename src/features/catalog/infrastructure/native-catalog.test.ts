@@ -139,26 +139,6 @@ describe('NativeCatalogGateway', () => {
     expect(audioCache.prepare).not.toHaveBeenCalled()
   })
 
-  it('releases a managed cache hit when the caller is superseded after resolution', async () => {
-    const invokeCommand = vi.fn()
-    const release = vi.fn()
-    const cached = {
-      kind: 'managed-url' as const,
-      url: 'asset://localhost/song.mp3',
-      mimeType: 'audio/mpeg',
-      release,
-    }
-    const audioCache = cacheGateway({ lookup: vi.fn(async () => cached) })
-    const gateway = new NativeCatalogGateway(invokeCommand, () => 'stream-1', true, audioCache)
-    const controller = new AbortController()
-
-    const source = await gateway.resolveStream(1, '320000', controller.signal)
-    controller.abort('superseded')
-
-    expect(source.kind).toBe('managed-url')
-    expect(release).toHaveBeenCalledOnce()
-  })
-
   it('prepares seek-safe MP3 bytes before the first macOS playback', async () => {
     const invokeCommand = vi.fn(async () => ({
       url: 'https://audio.test/song.mp3',
