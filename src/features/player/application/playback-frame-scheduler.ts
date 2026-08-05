@@ -6,7 +6,10 @@ export interface PlaybackFrame {
 export type PlaybackFrameSubscriber = (frame: PlaybackFrame) => void
 
 export interface PlaybackFrameScheduler {
-  subscribe(subscriber: PlaybackFrameSubscriber): () => void
+  subscribe(
+    subscriber: PlaybackFrameSubscriber,
+    readTime?: (() => number) | null,
+  ): () => void
   setClock(readTime: (() => number) | null): () => void
   wake(): void
 }
@@ -42,17 +45,17 @@ export function createPlaybackFrameScheduler(
   const requestFrame = options.requestFrame ?? defaultRequestFrame
   const cancelFrame = options.cancelFrame ?? defaultCancelFrame
   const isHidden = options.isHidden ?? (() => Boolean(globalThis.document?.hidden))
-  const subscribers = new Set<PlaybackFrameSubscriber>()
+  const subscribers = new Map<
+    PlaybackFrameSubscriber,
+    (() => number) | null | undefined
+  >()
   let readTime = options.readTime ?? null
   const clockLeases: Array<{
-    readonly owner: object
     readonly readTime: (() => number) | null
-    released: boolean
   }> = []
   let frameId: number | null = null
 
   const restoreLatestClock = (): void => {
-    while (clockLeases.at(-1)?.released) clockLeases.pop()
     const latest = clockLeases.at(-1)
     readTime = latest === undefined ? (options.readTime ?? null) : latest.readTime
   }
@@ -62,15 +65,26 @@ export function createPlaybackFrameScheduler(
     frameId = requestFrame((timestamp) => {
       frameId = null
       if (subscribers.size === 0 || isHidden()) return
-      const currentTime = readTime?.() ?? Number.NaN
-      for (const subscriber of [...subscribers]) subscriber({ timestamp, currentTime })
+      const sampledTimes = new Map<(() => number) | null, number>()
+      const sample = (clock: (() => number) | null): number => {
+        if (clock === null) return Number.NaN
+        const existing = sampledTimes.get(clock)
+        if (existing !== undefined) return existing
+        const currentTime = clock()
+        sampledTimes.set(clock, currentTime)
+        return currentTime
+      }
+      for (const [subscriber, subscriberClock] of [...subscribers]) {
+        const clock = subscriberClock === undefined ? readTime : subscriberClock
+        subscriber({ timestamp, currentTime: sample(clock) })
+      }
       schedule()
     })
   }
 
   return {
-    subscribe(subscriber) {
-      subscribers.add(subscriber)
+    subscribe(subscriber, subscriberClock) {
+      subscribers.set(subscriber, subscriberClock)
       schedule()
       return () => {
         if (!subscribers.delete(subscriber) || subscribers.size > 0) return
@@ -79,14 +93,18 @@ export function createPlaybackFrameScheduler(
       }
     },
     setClock(nextReadTime) {
-      const owner = {}
-      const lease = { owner, readTime: nextReadTime, released: false }
+      const lease = { readTime: nextReadTime }
       clockLeases.push(lease)
       readTime = nextReadTime
+      let released = false
       return () => {
-        if (lease.released) return
-        lease.released = true
-        restoreLatestClock()
+        if (released) return
+        released = true
+        const index = clockLeases.indexOf(lease)
+        if (index < 0) return
+        const wasLatest = index === clockLeases.length - 1
+        clockLeases.splice(index, 1)
+        if (wasLatest) restoreLatestClock()
       }
     },
     wake() {

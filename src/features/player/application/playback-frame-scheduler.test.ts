@@ -131,4 +131,48 @@ describe('playback frame scheduler', () => {
     expect(listener).toHaveBeenCalledWith({ currentTime: Number.NaN, timestamp: 100 })
     releaseClock()
   })
+
+  it('keeps independent subscriber clocks isolated while sampling each once', () => {
+    let nextFrame: FrameRequestCallback | undefined
+    const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+      nextFrame = callback
+      return requestFrame.mock.calls.length
+    })
+    const cancelFrame = vi.fn()
+    const scheduler = createPlaybackFrameScheduler({ requestFrame, cancelFrame })
+    const firstClock = vi.fn(() => 10)
+    const secondClock = vi.fn(() => 20)
+    const firstListener = vi.fn()
+    const secondListener = vi.fn()
+    scheduler.subscribe(firstListener, firstClock)
+    scheduler.subscribe(secondListener, secondClock)
+
+    nextFrame?.(100)
+
+    expect(firstClock).toHaveBeenCalledOnce()
+    expect(secondClock).toHaveBeenCalledOnce()
+    expect(firstListener).toHaveBeenCalledWith({ currentTime: 10, timestamp: 100 })
+    expect(secondListener).toHaveBeenCalledWith({ currentTime: 20, timestamp: 100 })
+  })
+
+  it('shares one clock sample between subscribers bound to the same owner', () => {
+    let nextFrame: FrameRequestCallback | undefined
+    const scheduler = createPlaybackFrameScheduler({
+      requestFrame: (callback) => {
+        nextFrame = callback
+        return 1
+      },
+    })
+    const clock = vi.fn(() => 42)
+    const firstListener = vi.fn()
+    const secondListener = vi.fn()
+    scheduler.subscribe(firstListener, clock)
+    scheduler.subscribe(secondListener, clock)
+
+    nextFrame?.(100)
+
+    expect(clock).toHaveBeenCalledOnce()
+    expect(firstListener).toHaveBeenCalledWith({ currentTime: 42, timestamp: 100 })
+    expect(secondListener).toHaveBeenCalledWith({ currentTime: 42, timestamp: 100 })
+  })
 })

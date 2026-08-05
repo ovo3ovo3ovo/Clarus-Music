@@ -924,9 +924,18 @@ function ensureLyricClock(): void {
   ) {
     return
   }
-  stopLyricSubscription = playbackFrameScheduler.subscribe(({ timestamp, currentTime }) => {
-    tickLyricClock(timestamp, currentTime)
-  })
+  const playbackClock =
+    typeof player.readPlaybackTime === 'function'
+      ? player.readPlaybackTime
+      : typeof player.readCurrentTime === 'function'
+        ? player.readCurrentTime
+        : null
+  stopLyricSubscription = playbackFrameScheduler.subscribe(
+    ({ timestamp, currentTime }) => {
+      tickLyricClock(timestamp, currentTime)
+    },
+    playbackClock,
+  )
 }
 
 function tickLyricClock(timestamp: number, currentTimeSeconds = Number.NaN): void {

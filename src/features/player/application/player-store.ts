@@ -231,7 +231,8 @@ export function createPlayerStore(
         error.value = asError(reason)
       })
     engine.setVolume(volume.value)
-    const releasePlaybackClock = playbackFrameScheduler.setClock(() => engine.currentTime)
+    const playbackClock = () => engine.currentTime
+    const releasePlaybackClock = playbackFrameScheduler.setClock(playbackClock)
 
     const stopProgressClock = () => {
       stopProgressSubscription?.()
@@ -245,7 +246,7 @@ export function createPlayerStore(
     const syncProgressClock = () => {
       stopProgressClock()
       if (playing.value && !document.hidden) {
-        stopProgressSubscription = playbackFrameScheduler.subscribe(tickProgress)
+        stopProgressSubscription = playbackFrameScheduler.subscribe(tickProgress, playbackClock)
       } else {
         playbackFrameScheduler.wake()
       }
@@ -610,9 +611,13 @@ export function createPlayerStore(
     // Read the media element directly, matching the legacy player's seek(null)
     // behavior for lyric synchronization after a seek.
     function readCurrentTime(): number {
-      const value = engine.currentTime
+      const value = readPlaybackTime()
       if (!playing.value) progress.value = value
       return value
+    }
+
+    function readPlaybackTime(): number {
+      return engine.currentTime
     }
 
     function setVolume(value: number): void {
@@ -802,6 +807,7 @@ export function createPlayerStore(
       togglePlayback,
       seek,
       readCurrentTime,
+      readPlaybackTime,
       setVolume,
       toggleLike,
       syncLikeState,
