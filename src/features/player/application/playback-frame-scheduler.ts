@@ -44,8 +44,18 @@ export function createPlaybackFrameScheduler(
   const isHidden = options.isHidden ?? (() => Boolean(globalThis.document?.hidden))
   const subscribers = new Set<PlaybackFrameSubscriber>()
   let readTime = options.readTime ?? null
-  let clockOwner: object | null = null
+  const clockLeases: Array<{
+    readonly owner: object
+    readonly readTime: (() => number) | null
+    released: boolean
+  }> = []
   let frameId: number | null = null
+
+  const restoreLatestClock = (): void => {
+    while (clockLeases.at(-1)?.released) clockLeases.pop()
+    const latest = clockLeases.at(-1)
+    readTime = latest === undefined ? (options.readTime ?? null) : latest.readTime
+  }
 
   const schedule = (): void => {
     if (frameId !== null || subscribers.size === 0 || isHidden()) return
@@ -70,12 +80,13 @@ export function createPlaybackFrameScheduler(
     },
     setClock(nextReadTime) {
       const owner = {}
-      clockOwner = owner
+      const lease = { owner, readTime: nextReadTime, released: false }
+      clockLeases.push(lease)
       readTime = nextReadTime
       return () => {
-        if (clockOwner !== owner) return
-        clockOwner = null
-        readTime = null
+        if (lease.released) return
+        lease.released = true
+        restoreLatestClock()
       }
     },
     wake() {

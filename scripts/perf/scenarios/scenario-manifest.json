@@ -1,0 +1,137 @@
+{
+  "$schema": "clarus.perf.scenarios",
+  "schemaVersion": 1,
+  "fixtureRoles": [
+    "tone-short-mp3",
+    "tone-long-mp3",
+    "tone-seek-mp3",
+    "tone-flac",
+    "word-timed-yrc"
+  ],
+  "requiredMetrics": [
+    "cpu.percent",
+    "process.thread_count",
+    "memory.physical_footprint_bytes",
+    "memory.physical_footprint_peak_bytes",
+    "memory.total_physical_footprint_bytes",
+    "frame.time_ms",
+    "frame.long_task_count",
+    "runtime.dom_node_count",
+    "runtime.listener_count",
+    "runtime.active_timer_count",
+    "runtime.active_animation_frame_count",
+    "runtime.audio_context_count",
+    "runtime.media_element_count",
+    "runtime.cache_lease_count",
+    "runtime.active_request_count",
+    "io.network_bytes",
+    "io.persistent_cache_bytes"
+  ],
+  "scenarios": [
+    {
+      "id": "startup",
+      "scenarioClass": "startup",
+      "automation": "native-manual-required",
+      "requiredRuns": 10,
+      "durationSeconds": 30,
+      "fixtureRoles": ["tone-short-mp3"],
+      "steps": [
+        "launch release bundle from a cold process",
+        "wait for the app shell and settings/auth restore to settle",
+        "capture startup footprint and first usable paint",
+        "terminate the app and verify all child processes exit"
+      ]
+    },
+    {
+      "id": "idle",
+      "scenarioClass": "runtime",
+      "automation": "external-sampler",
+      "requiredRuns": 5,
+      "durationSeconds": 60,
+      "fixtureRoles": [],
+      "steps": [
+        "leave the release app visible with no active playback",
+        "capture CPU, threads, footprint and runtime diagnostics",
+        "repeat after the warmup window without user interaction"
+      ]
+    },
+    {
+      "id": "interaction",
+      "scenarioClass": "runtime",
+      "automation": "native-manual-required",
+      "requiredRuns": 5,
+      "durationSeconds": 120,
+      "fixtureRoles": ["tone-short-mp3"],
+      "steps": [
+        "search, open a detail page, navigate back and restore scroll",
+        "create a queue, use play-next and change repeat/shuffle/reverse",
+        "change volume and seek while observing state and error handling"
+      ]
+    },
+    {
+      "id": "animation",
+      "scenarioClass": "runtime",
+      "automation": "native-manual-required",
+      "requiredRuns": 5,
+      "durationSeconds": 30,
+      "fixtureRoles": ["tone-short-mp3", "word-timed-yrc"],
+      "steps": [
+        "open lyrics with word timing and translation/romanization",
+        "capture 60 Hz active-line, word-fill and scroll-spring traces",
+        "exercise wheel, touch, hover, context menu and reduced-motion"
+      ]
+    },
+    {
+      "id": "audio",
+      "scenarioClass": "runtime",
+      "automation": "native-manual-required",
+      "requiredRuns": 5,
+      "durationSeconds": 180,
+      "fixtureRoles": ["tone-short-mp3", "tone-seek-mp3", "tone-flac"],
+      "steps": [
+        "load remote and managed cache sources",
+        "test pause/resume, seek markers, ended, repeat and rapid replacement",
+        "test volume, MediaSession and output-device fallback"
+      ]
+    },
+    {
+      "id": "combined",
+      "scenarioClass": "runtime",
+      "automation": "native-manual-required",
+      "requiredRuns": 5,
+      "durationSeconds": 180,
+      "fixtureRoles": ["tone-long-mp3", "word-timed-yrc"],
+      "steps": [
+        "play audio while lyrics animation and background are visible",
+        "capture synchronized progress, active-line and scroll traces",
+        "compare CPU, frame time, WebContent and GPU footprint"
+      ]
+    },
+    {
+      "id": "long-soak",
+      "scenarioClass": "runtime",
+      "automation": "native-manual-required",
+      "requiredRuns": 1,
+      "durationSeconds": 3600,
+      "fixtureRoles": ["tone-long-mp3", "word-timed-yrc"],
+      "steps": [
+        "run ordinary playback and lyrics for 60 minutes",
+        "sample after GC opportunities and record diagnostic counter slopes",
+        "verify leases, requests, timers, listeners and child processes at exit"
+      ]
+    },
+    {
+      "id": "lifecycle-cycle",
+      "scenarioClass": "runtime",
+      "automation": "native-manual-required",
+      "requiredRuns": 1,
+      "durationSeconds": 600,
+      "fixtureRoles": ["tone-short-mp3", "word-timed-yrc"],
+      "steps": [
+        "repeat lyrics, MV, route, login and playback enter/exit flows 30 times",
+        "capture DOM, listener, timer, media, lease and request counts per cycle",
+        "require post-cycle steady state to match the pre-cycle baseline"
+      ]
+    }
+  ]
+}

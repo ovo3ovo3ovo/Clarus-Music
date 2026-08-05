@@ -440,7 +440,7 @@ export function createLocalPlayerQueuePersistence(
             recoveredLegacySnapshot = true
           }
         }
-        if (snapshot === null && usesVersionedRecords) {
+        if (snapshot === null && isSplit) {
           const legacySnapshot = parsePlayerQueueSnapshot(legacyRecord)
           if (legacySnapshot !== null) {
             snapshot = legacySnapshot

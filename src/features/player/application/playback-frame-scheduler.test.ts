@@ -93,4 +93,42 @@ describe('playback frame scheduler', () => {
     expect(listener).toHaveBeenCalledWith({ currentTime: 20, timestamp: 100 })
     releaseSecond()
   })
+
+  it('restores the previous active clock when the newest owner leaves', () => {
+    let nextFrame: FrameRequestCallback | undefined
+    const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+      nextFrame = callback
+      return requestFrame.mock.calls.length
+    })
+    const scheduler = createPlaybackFrameScheduler({ requestFrame })
+    const listener = vi.fn()
+    scheduler.subscribe(listener)
+
+    const releaseFirst = scheduler.setClock(() => 10)
+    const releaseSecond = scheduler.setClock(() => 20)
+    releaseSecond()
+    nextFrame?.(100)
+
+    expect(listener).toHaveBeenCalledWith({ currentTime: 10, timestamp: 100 })
+    releaseFirst()
+  })
+
+  it('preserves an explicitly empty clock lease', () => {
+    let nextFrame: FrameRequestCallback | undefined
+    const scheduler = createPlaybackFrameScheduler({
+      requestFrame: (callback) => {
+        nextFrame = callback
+        return 1
+      },
+      readTime: () => 5,
+    })
+    const listener = vi.fn()
+    scheduler.subscribe(listener)
+
+    const releaseClock = scheduler.setClock(null)
+    nextFrame?.(100)
+
+    expect(listener).toHaveBeenCalledWith({ currentTime: Number.NaN, timestamp: 100 })
+    releaseClock()
+  })
 })

@@ -10,7 +10,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings=0",
-    "perf:test": "node --test --test-concurrency=1 scripts/perf/fixtures/generate.test.mjs scripts/perf/fixtures/verify.test.mjs scripts/perf/fixtures/range-server.test.mjs scripts/perf/sampling/report-schema.test.mjs scripts/perf/sampling/statistics.test.mjs scripts/perf/sampling/pid-attribution.test.mjs scripts/perf/sampling/external-sampler.test.mjs scripts/perf/sampling/summarize.test.mjs",
+    "perf:test": "node --test --test-concurrency=1 scripts/perf/fixtures/generate.test.mjs scripts/perf/fixtures/verify.test.mjs scripts/perf/fixtures/range-server.test.mjs scripts/perf/scenarios/scenario-manifest.test.mjs scripts/perf/sampling/report-schema.test.mjs scripts/perf/sampling/statistics.test.mjs scripts/perf/sampling/pid-attribution.test.mjs scripts/perf/sampling/external-sampler.test.mjs scripts/perf/sampling/summarize.test.mjs",
     "perf:sample": "node scripts/perf/sampling/sample.mjs",
     "perf:summarize": "node scripts/perf/sampling/summarize.mjs",
     "perf:fixtures:generate": "node scripts/perf/fixtures/generate.mjs",

@@ -57,6 +57,12 @@ The server verifies before listening, exposes only lock-listed filenames, suppor
 
 Every before/after A/B pair must reuse the exact same fixture directory and its exact `fixtures.lock.json`. Regenerating or changing any locked file invalidates that comparison; start a new pair instead. The sampler retains no-follow identity and timestamp witnesses across numeric phases, so changing and then restoring bytes during a run also makes that run unusable. Run verification immediately before each measurement session.
 
+## Scenario manifest and availability
+
+The canonical release scenario contract is [`scenarios/scenario-manifest.json`](scenarios/scenario-manifest.json). It names the required startup, idle, interaction, animation, audio, combined, long-soak, and lifecycle-cycle scenarios, their fixture roles, repeat counts, and required runtime observations. `npm run perf:test` validates the manifest and rejects unknown or misclassified scenarios.
+
+The manifest intentionally distinguishes tooling from execution. The current external sampler can collect only the `idle` runtime scenario and explicitly refuses cold `startup`; the interaction, animation, audio, combined, soak, and lifecycle scenarios require an authorized native-window runner. A manifest entry is a contract, not evidence that a scenario has been executed. Missing native runs must remain unavailable in reports.
+
 ## External sampler and versioned reports
 
 `perf:sample` is non-production, macOS-only measurement infrastructure. It attaches to one already-running **release** bundle; it never launches, controls, signals, instruments, or imports the Clarus Music product. Its output is not evidence of a product performance improvement.

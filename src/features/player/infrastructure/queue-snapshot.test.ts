@@ -229,6 +229,82 @@ describe('player queue snapshots', () => {
     expect(values.has('queue.state.1')).toBe(true)
   })
 
+  it('rejects a mixed current generation and recovers the complete previous pair', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const initial = snapshot()
+    createLocalPlayerQueuePersistence(storage, 'queue').save(initial)
+    values.set(
+      'queue.queue.2',
+      JSON.stringify({
+        storageVersion: 1,
+        revision: 2,
+        queue: [track(99)],
+        playNextQueue: initial.playNextQueue,
+        playbackOrder: [],
+        queueSource: 'corrupt-current-generation',
+      }),
+    )
+    values.set(
+      'queue.state.2',
+      JSON.stringify({
+        storageVersion: 1,
+        revision: 1,
+        currentTrack: initial.currentTrack,
+        currentIndex: initial.currentIndex,
+        currentIsPlayNext: initial.currentIsPlayNext,
+        repeatMode: initial.repeatMode,
+        shuffle: initial.shuffle,
+        reversed: initial.reversed,
+        volume: initial.volume,
+        progress: initial.progress,
+      }),
+    )
+    values.set(
+      'queue.meta',
+      JSON.stringify({
+        storageVersion: 1,
+        storage: 'split',
+        queueRevision: 2,
+        stateRevision: 2,
+        previousQueueRevision: 1,
+        previousStateRevision: 1,
+      }),
+    )
+
+    expect(createLocalPlayerQueuePersistence(storage, 'queue').load()).toEqual(initial)
+  })
+
+  it('uses a valid legacy shadow when the current marker is malformed', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const initial = snapshot()
+    createLocalPlayerQueuePersistence(storage, 'queue').save(initial)
+    values.set(
+      'queue.meta',
+      JSON.stringify({
+        storageVersion: 1,
+        storage: 'split',
+        queueRevision: 'not-a-revision',
+        stateRevision: 0,
+        previousQueueRevision: null,
+        previousStateRevision: null,
+      }),
+    )
+
+    expect(createLocalPlayerQueuePersistence(storage, 'queue').load()).toEqual(initial)
+    expect(values.has('queue.meta')).toBe(false)
+    expect(values.has('queue')).toBe(true)
+  })
+
   it('falls back to the legacy shadow when a marker has no usable generation', () => {
     const values = new Map<string, string>()
     const storage = {
