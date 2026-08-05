@@ -7,8 +7,11 @@ export interface CoverImageOptions {
 
 const SQUARE_WIDTHS = [512, 1024, 1600] as const
 const LANDSCAPE_WIDTHS = [960, 1280, 1920] as const
+const MAX_ACTIVE_PRELOADS = 4
+const MAX_PENDING_PRELOADS = 32
 const prefetchedUrls = new Set<string>()
 const activePreloads = new Set<HTMLImageElement>()
+const pendingPreloads: string[] = []
 
 function normalizedPixelRatio(value?: number): number {
   if (value !== undefined && Number.isFinite(value)) return Math.max(1, value)
@@ -169,11 +172,23 @@ export function preloadCoverImages(source: string): void {
     if (url.length === 0 || prefetchedUrls.has(url)) continue
     if (prefetchedUrls.size >= 512) prefetchedUrls.clear()
     prefetchedUrls.add(url)
+    if (pendingPreloads.length >= MAX_PENDING_PRELOADS) continue
+    pendingPreloads.push(url)
+  }
+  pumpCoverPreloads()
+}
 
+function pumpCoverPreloads(): void {
+  while (activePreloads.size < MAX_ACTIVE_PRELOADS && pendingPreloads.length > 0) {
+    const url = pendingPreloads.shift()
+    if (!url) continue
     const image = new Image()
     image.decoding = 'async'
     activePreloads.add(image)
-    const release = () => activePreloads.delete(image)
+    const release = () => {
+      if (!activePreloads.delete(image)) return
+      pumpCoverPreloads()
+    }
     image.addEventListener('load', release, { once: true })
     image.addEventListener('error', release, { once: true })
     image.src = url

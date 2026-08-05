@@ -1,9 +1,24 @@
 import { nextTick } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { installRouteScrollManager } from './route-scroll'
+import { createRouteScrollPositionStore, installRouteScrollManager } from './route-scroll'
 
 describe('route scroll manager', () => {
+  it('bounds retained route positions while refreshing recently used entries', () => {
+    const positions = createRouteScrollPositionStore(3)
+    positions.set('/one', 10)
+    positions.set('/two', 20)
+    positions.set('/three', 30)
+    expect(positions.size()).toBe(3)
+
+    expect(positions.get('/one')).toBe(10)
+    positions.set('/four', 40)
+
+    expect(positions.get('/two')).toBeUndefined()
+    expect(positions.get('/one')).toBe(10)
+    expect(positions.size()).toBe(3)
+  })
+
   it('restores a route position when navigating back', async () => {
     const router = createRouter({
       history: createMemoryHistory(),

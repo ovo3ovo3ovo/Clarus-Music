@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { coverImageCandidates, coverImageUrl } from './cover-image'
+import { describe, expect, it, vi } from 'vitest'
+import { coverImageCandidates, coverImageUrl, preloadCoverImages } from './cover-image'
 
 describe('coverImageUrl', () => {
   it('replaces an existing low-resolution param with one Retina variant', () => {
@@ -42,5 +42,34 @@ describe('coverImageUrl', () => {
     expect(candidates.some((url) => url === 'https://p1.music.126.net/hash/cover.jpg')).toBe(true)
     expect(candidates.some((url) => url.includes('p2.music.126.net'))).toBe(true)
     expect(candidates.some((url) => url.startsWith('http://p1.music.126.net'))).toBe(true)
+  })
+})
+
+describe('cover image preloading', () => {
+  it('limits concurrent speculative image requests and starts queued work on release', () => {
+    const images: Array<{ listeners: Record<string, () => void>; src: string }> = []
+    class FakeImage {
+      readonly listeners: Record<string, () => void> = {}
+      src = ''
+
+      addEventListener(event: string, listener: () => void): void {
+        this.listeners[event] = listener
+      }
+
+      constructor() {
+        images.push(this)
+      }
+    }
+    vi.stubGlobal('Image', FakeImage)
+    try {
+      for (let index = 0; index < 5; index += 1) {
+        preloadCoverImages(`https://img.test/preload-${index}.jpg`)
+      }
+      expect(images.length).toBe(4)
+      images[0]?.listeners.load()
+      expect(images.length).toBe(5)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

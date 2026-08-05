@@ -8,13 +8,46 @@ export interface ScrollContainer {
 
 export type ScrollContainerProvider = () => ScrollContainer | null
 
+export const MAX_ROUTE_SCROLL_POSITIONS = 256
+
+export function createRouteScrollPositionStore(limit = MAX_ROUTE_SCROLL_POSITIONS) {
+  const positions = new Map<string, number>()
+  const boundedLimit = Number.isSafeInteger(limit) && limit > 0 ? limit : MAX_ROUTE_SCROLL_POSITIONS
+
+  return {
+    get(path: string): number | undefined {
+      const value = positions.get(path)
+      if (value === undefined) return undefined
+      positions.delete(path)
+      positions.set(path, value)
+      return value
+    },
+    set(path: string, value: number): void {
+      if (!Number.isFinite(value)) return
+      positions.delete(path)
+      positions.set(path, Math.max(0, value))
+      while (positions.size > boundedLimit) {
+        const oldest = positions.keys().next().value
+        if (oldest === undefined) break
+        positions.delete(oldest)
+      }
+    },
+    size(): number {
+      return positions.size
+    },
+    clear(): void {
+      positions.clear()
+    },
+  }
+}
+
 /** Keeps the app's fixed scroll container in sync with router history. */
 export function installRouteScrollManager(
   router: Pick<Router, 'beforeEach' | 'afterEach'>,
   getContainer: ScrollContainerProvider = () =>
     document.querySelector('.app-content') as ScrollContainer | null,
 ): () => void {
-  const positions = new Map<string, number>()
+  const positions = createRouteScrollPositionStore()
   let navigationVersion = 0
 
   const removeBefore = router.beforeEach((to, from) => {
