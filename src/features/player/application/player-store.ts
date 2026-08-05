@@ -29,6 +29,7 @@ import {
 import { HowlerAudioEngine } from '../infrastructure/howler-audio-engine'
 import { nativeTrackLikeGateway, type TrackLikeGateway } from '../infrastructure/native-like'
 import { emitTrackLikeChange } from './track-like-events'
+import { playbackFrameScheduler } from './playback-frame-scheduler'
 import {
   createLocalPlayerQueuePersistence,
   MAX_PERSISTED_PLAY_NEXT_TRACKS,
@@ -125,7 +126,7 @@ export function createPlayerStore(
     let navigationController: AbortController | null = null
     let likeController: AbortController | null = null
     let likeStateVersion = 0
-    let animationFrame: number | null = null
+    let stopProgressSubscription: (() => void) | null = null
     const playing = computed(() => state.value === 'playing')
     const enabled = computed(() => currentTrack.value !== null)
     const upcomingTracks = computed(() =>
@@ -230,20 +231,24 @@ export function createPlayerStore(
         error.value = asError(reason)
       })
     engine.setVolume(volume.value)
+    const releasePlaybackClock = playbackFrameScheduler.setClock(() => engine.currentTime)
 
     const stopProgressClock = () => {
-      if (animationFrame !== null) cancelAnimationFrame(animationFrame)
-      animationFrame = null
+      stopProgressSubscription?.()
+      stopProgressSubscription = null
     }
 
-    const tickProgress = () => {
-      progress.value = engine.currentTime
-      animationFrame = requestAnimationFrame(tickProgress)
+    const tickProgress = ({ currentTime }: { readonly currentTime: number }) => {
+      if (Number.isFinite(currentTime)) progress.value = currentTime
     }
 
     const syncProgressClock = () => {
       stopProgressClock()
-      if (playing.value && !document.hidden) animationFrame = requestAnimationFrame(tickProgress)
+      if (playing.value && !document.hidden) {
+        stopProgressSubscription = playbackFrameScheduler.subscribe(tickProgress)
+      } else {
+        playbackFrameScheduler.wake()
+      }
     }
 
     const syncMediaPosition = (position = engine.currentTime) => {
@@ -750,6 +755,7 @@ export function createPlayerStore(
       activeLoad.value = null
       cancelLike('Player disposed')
       stopProgressClock()
+      releasePlaybackClock()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       for (const unsubscribe of unsubscribers) unsubscribe()
       mediaSession.dispose()

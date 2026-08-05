@@ -234,6 +234,7 @@ import CoverImage from '@/components/common/CoverImage.vue'
 import AppIcon from '@/components/common/AppIcon.vue'
 import IconButton from '@/components/common/IconButton.vue'
 import { usePlayerStore } from '@/features/player/application/player-store'
+import { playbackFrameScheduler } from '@/features/player/application/playback-frame-scheduler'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import { coverImageUrl } from '@/platform/cover-image'
 import { formatArtists } from '@/types/music'
@@ -268,7 +269,7 @@ const lyricMenu = ref<{
 } | null>(null)
 let backgroundController: AbortController | null = null
 let copyTimer: number | null = null
-let lyricAnimationFrame: number | null = null
+let stopLyricSubscription: (() => void) | null = null
 let seekCommitFrame: number | null = null
 
 // Keep the lyric surface in step with the player bar: the selected target is
@@ -909,24 +910,29 @@ function advanceLyricScroll(timestamp: number): void {
 }
 
 function stopLyricClock(): void {
-  if (lyricAnimationFrame !== null) window.cancelAnimationFrame(lyricAnimationFrame)
-  lyricAnimationFrame = null
+  stopLyricSubscription?.()
+  stopLyricSubscription = null
+  lastFrameTimestamp = null
 }
 
 function ensureLyricClock(): void {
   if (
-    lyricAnimationFrame !== null ||
+    stopLyricSubscription !== null ||
     !lyricsStore.visible ||
     document.hidden ||
     (!player.playing && scrollTarget === null)
   ) {
     return
   }
-  lyricAnimationFrame = window.requestAnimationFrame(tickLyricClock)
+  stopLyricSubscription = playbackFrameScheduler.subscribe(({ timestamp, currentTime }) => {
+    tickLyricClock(timestamp, currentTime)
+  })
 }
 
-function tickLyricClock(timestamp: number): void {
-  const currentTimeMs = currentLyricTimeMs()
+function tickLyricClock(timestamp: number, currentTimeSeconds = Number.NaN): void {
+  const currentTimeMs = Number.isFinite(currentTimeSeconds)
+    ? currentTimeSeconds * 1_000
+    : currentLyricTimeMs()
   syncLyricIndex(currentTimeMs)
   advanceLyricScroll(timestamp)
   // Keep the previous frame timestamp available while advanceLyricScroll
@@ -934,8 +940,9 @@ function tickLyricClock(timestamp: number): void {
   // frame look like a zero-duration frame, freezing the spring at its initial
   // scrollTop even though a target has been measured.
   lastFrameTimestamp = timestamp
-  lyricAnimationFrame = null
-  ensureLyricClock()
+  if (!lyricsStore.visible || document.hidden || (!player.playing && scrollTarget === null)) {
+    stopLyricClock()
+  }
 }
 
 function syncLyricClock(visible: boolean): void {

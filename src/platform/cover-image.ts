@@ -9,8 +9,10 @@ const SQUARE_WIDTHS = [512, 1024, 1600] as const
 const LANDSCAPE_WIDTHS = [960, 1280, 1920] as const
 const MAX_ACTIVE_PRELOADS = 4
 const MAX_PENDING_PRELOADS = 32
-const prefetchedUrls = new Set<string>()
-const activePreloads = new Set<HTMLImageElement>()
+const MAX_REMEMBERED_PRELOADS = 512
+const PRELOAD_TIMEOUT_MS = 15_000
+const prefetchedUrls = new Map<string, true>()
+const activePreloads = new Map<HTMLImageElement, string>()
 const pendingPreloads: string[] = []
 
 function normalizedPixelRatio(value?: number): number {
@@ -169,13 +171,43 @@ export function preloadCoverImages(source: string): void {
       minWidth: size,
       pixelRatio: 1,
     })
-    if (url.length === 0 || prefetchedUrls.has(url)) continue
-    if (prefetchedUrls.size >= 512) prefetchedUrls.clear()
-    prefetchedUrls.add(url)
-    if (pendingPreloads.length >= MAX_PENDING_PRELOADS) continue
+    if (
+      url.length === 0 ||
+      touchRememberedPreload(url) ||
+      pendingPreloads.length >= MAX_PENDING_PRELOADS ||
+      !rememberPreload(url)
+    ) {
+      continue
+    }
     pendingPreloads.push(url)
   }
   pumpCoverPreloads()
+}
+
+function touchRememberedPreload(url: string): boolean {
+  if (!prefetchedUrls.has(url)) return false
+  prefetchedUrls.delete(url)
+  prefetchedUrls.set(url, true)
+  return true
+}
+
+function rememberPreload(url: string): boolean {
+  if (prefetchedUrls.has(url)) return false
+
+  if (prefetchedUrls.size >= MAX_REMEMBERED_PRELOADS) {
+    const activeUrls = new Set(activePreloads.values())
+    let evicted = false
+    for (const candidate of prefetchedUrls.keys()) {
+      if (activeUrls.has(candidate) || pendingPreloads.includes(candidate)) continue
+      prefetchedUrls.delete(candidate)
+      evicted = true
+      break
+    }
+    if (!evicted) return false
+  }
+
+  prefetchedUrls.set(url, true)
+  return true
 }
 
 function pumpCoverPreloads(): void {
@@ -184,13 +216,16 @@ function pumpCoverPreloads(): void {
     if (!url) continue
     const image = new Image()
     image.decoding = 'async'
-    activePreloads.add(image)
+    activePreloads.set(image, url)
+    let timeout: ReturnType<typeof globalThis.setTimeout> | null = null
     const release = () => {
       if (!activePreloads.delete(image)) return
+      if (timeout !== null) globalThis.clearTimeout(timeout)
       pumpCoverPreloads()
     }
     image.addEventListener('load', release, { once: true })
     image.addEventListener('error', release, { once: true })
+    timeout = globalThis.setTimeout(release, PRELOAD_TIMEOUT_MS)
     image.src = url
   }
 }
