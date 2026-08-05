@@ -22,7 +22,9 @@
     <ToastHost />
     <AppDialogHost />
     <Transition name="lyrics-slide">
-      <LyricsOverlay v-if="lyricsStore.visible" />
+      <div v-if="lyricsStore.visible" class="lyrics-overlay-shell">
+        <LyricsOverlay />
+      </div>
     </Transition>
   </div>
 </template>
@@ -107,3 +109,31 @@ onBeforeUnmount(() => {
   removeRouteScrollManager = null
 })
 </script>
+
+<style scoped lang="scss">
+.lyrics-overlay-shell {
+  position: fixed;
+  z-index: 240;
+  inset: 0;
+  overflow: hidden;
+  background: var(--color-body-bg);
+}
+
+.lyrics-slide-enter-active .lyrics-overlay,
+.lyrics-slide-leave-active .lyrics-overlay {
+  transition: transform 380ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.lyrics-slide-enter-from .lyrics-overlay,
+.lyrics-slide-leave-to .lyrics-overlay {
+  transform: translate3d(0, 100%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lyrics-slide-enter-active .lyrics-overlay,
+  .lyrics-slide-leave-active .lyrics-overlay {
+    transition: none;
+  }
+}
+</style>

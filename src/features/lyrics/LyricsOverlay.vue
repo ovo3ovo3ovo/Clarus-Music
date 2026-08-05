@@ -1062,7 +1062,7 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .lyrics-overlay {
-  position: fixed;
+  position: absolute;
   z-index: 240;
   inset: 0;
   display: grid;
@@ -1628,19 +1628,6 @@ onUnmounted(() => {
   bottom: 20px;
 }
 
-.lyrics-slide-enter-active,
-.lyrics-slide-leave-active {
-  transition:
-    transform 360ms linear,
-    opacity 360ms linear;
-}
-
-.lyrics-slide-enter-from,
-.lyrics-slide-leave-to {
-  opacity: 0;
-  transform: translateY(100%);
-}
-
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -1667,9 +1654,7 @@ onUnmounted(() => {
     transform: none;
   }
 
-  .lyric-line,
-  .lyrics-slide-enter-active,
-  .lyrics-slide-leave-active {
+  .lyric-line {
     transition: none;
   }
 }
