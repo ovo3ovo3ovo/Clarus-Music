@@ -1,10 +1,11 @@
-import { invoke } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import type { AudioSource } from '@/features/player/domain/audio-engine'
 import type { MusicQuality } from '@/features/settings/domain/settings'
 import { desktop } from '@/platform/desktop'
 import type { AudioCacheStats } from '../domain/audio-cache'
 
 type InvokeCommand = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
+type ConvertFileSrc = (filePath: string) => string
 type UnknownRecord = Record<string, unknown>
 
 export interface CacheStoreRequest {
@@ -91,6 +92,7 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
   private readonly invokeCommand: InvokeCommand
   private readonly isDesktop: boolean
   private readonly createRequestId: () => string
+  private readonly createManagedUrl: ConvertFileSrc
   private automaticCachingEnabled = true
   private storeController: AbortController | null = null
 
@@ -98,10 +100,12 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
     invokeCommand: InvokeCommand = invoke,
     isDesktop = desktop.isDesktop,
     createRequestId: () => string = () => crypto.randomUUID(),
+    createManagedUrl: ConvertFileSrc = convertFileSrc,
   ) {
     this.invokeCommand = invokeCommand
     this.isDesktop = isDesktop
     this.createRequestId = createRequestId
+    this.createManagedUrl = createManagedUrl
   }
 
   configure(automaticCachingEnabled: boolean): void {
@@ -132,24 +136,40 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
       throw abortError(signal.reason)
     }
 
-    let bytes: ArrayBuffer
+    const release = this.createLeaseRelease(native.leaseId)
     try {
-      bytes = await this.invokeCommand<ArrayBuffer>('read_audio_cache_bytes', {
-        leaseId: native.leaseId,
-      })
-      if (signal?.aborted) throw abortError(signal.reason)
-      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== native.sizeBytes) {
-        throw new Error('Cached audio bytes did not match their index')
+      const url = this.createManagedUrl(native.filePath)
+      if (typeof url !== 'string' || url.length === 0) {
+        throw new Error('Cached audio asset URL was empty')
+      }
+
+      if (signal?.aborted) {
+        release()
+        throw abortError(signal.reason)
+      }
+      return {
+        kind: 'managed-url',
+        url,
+        release,
       }
     } catch (error) {
-      void this.releaseLease(native.leaseId)
-      throw error
-    }
-    void this.releaseLease(native.leaseId)
-    return {
-      kind: 'bytes',
-      bytes,
-      mimeType: native.mimeType,
+      if (signal?.aborted) {
+        release()
+        throw abortError(signal.reason)
+      }
+      try {
+        const bytes = await this.readCachedBytes(native, signal)
+        release()
+        return {
+          kind: 'bytes',
+          bytes,
+          mimeType: native.mimeType,
+        }
+      } catch (fallbackError) {
+        release()
+        if (signal?.aborted) throw abortError(signal.reason)
+        throw fallbackError ?? error
+      }
     }
   }
 
@@ -202,6 +222,29 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
 
   private releaseLease(leaseId: string): Promise<boolean> {
     return this.invokeCommand<boolean>('release_audio_cache_lease', { leaseId }).catch(() => false)
+  }
+
+  private createLeaseRelease(leaseId: string): () => void {
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      void this.releaseLease(leaseId)
+    }
+  }
+
+  private async readCachedBytes(
+    native: NativeCachedAudioSource,
+    signal?: AbortSignal,
+  ): Promise<ArrayBuffer> {
+    const bytes = await this.invokeCommand<ArrayBuffer>('read_audio_cache_bytes', {
+      leaseId: native.leaseId,
+    })
+    if (signal?.aborted) throw abortError(signal.reason)
+    if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== native.sizeBytes) {
+      throw new Error('Cached audio bytes did not match their index')
+    }
+    return bytes
   }
 }
 

@@ -45,6 +45,10 @@ describe('native audio cache boundary', () => {
     const gateway = new NativeAudioCacheGateway(
       invokeCommand as unknown as ConstructorParameters<typeof NativeAudioCacheGateway>[0],
       true,
+      undefined,
+      () => {
+        throw new Error('asset protocol unavailable')
+      },
     )
 
     const source = await gateway.lookup(42, '320000')
@@ -55,6 +59,47 @@ describe('native audio cache boundary', () => {
     await vi.waitFor(() => {
       expect(invokeCommand).toHaveBeenCalledWith('release_audio_cache_lease', {
         leaseId: 'audio-cache-1',
+      })
+    })
+    expect(
+      invokeCommand.mock.calls.filter(([command]) => command === 'release_audio_cache_lease'),
+    ).toHaveLength(1)
+  })
+
+  it('maps a cache hit to a managed asset URL and holds the lease until release', async () => {
+    const invokeCommand = vi.fn(async (command: string) => {
+      if (command === 'lookup_audio_cache') {
+        return {
+          filePath: '/cache/audio-v1/song.mp3',
+          mimeType: 'audio/mpeg',
+          sizeBytes: 2048,
+          leaseId: 'audio-cache-managed',
+        }
+      }
+      return true
+    })
+    const gateway = new NativeAudioCacheGateway(
+      invokeCommand as unknown as ConstructorParameters<typeof NativeAudioCacheGateway>[0],
+      true,
+      undefined,
+      (filePath) => `asset://localhost/${encodeURIComponent(filePath)}`,
+    )
+
+    const source = await gateway.lookup(42, '320000')
+
+    expect(source).toMatchObject({
+      kind: 'managed-url',
+      url: 'asset://localhost/%2Fcache%2Faudio-v1%2Fsong.mp3',
+    })
+    expect(invokeCommand).not.toHaveBeenCalledWith('read_audio_cache_bytes', expect.anything())
+    expect(invokeCommand).not.toHaveBeenCalledWith('release_audio_cache_lease', expect.anything())
+
+    if (source?.kind !== 'managed-url') throw new Error('expected managed URL source')
+    source.release()
+    source.release()
+    await vi.waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith('release_audio_cache_lease', {
+        leaseId: 'audio-cache-managed',
       })
     })
     expect(
@@ -81,6 +126,9 @@ describe('native audio cache boundary', () => {
       invokeCommand as unknown as ConstructorParameters<typeof NativeAudioCacheGateway>[0],
       true,
       () => 'cache-first-play',
+      () => {
+        throw new Error('asset protocol unavailable')
+      },
     )
 
     await expect(
