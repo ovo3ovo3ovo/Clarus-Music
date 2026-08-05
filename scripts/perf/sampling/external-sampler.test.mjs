@@ -405,6 +405,18 @@ test('sample CLI rejects subsecond top intervals that macOS cannot represent exa
   )
 })
 
+test('top timeout covers the full one-hour maximum sampling window', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  harness.options.samples = 60
+  harness.options.intervalMs = 60000
+
+  await runExternalSampler(harness.options, harness.dependencies)
+
+  const topCall = harness.calls.find((call) => call.file === '/usr/bin/top')
+  assert.equal(topCall?.options.timeoutMs, 60 * 60000 + 60000 + 30000)
+})
+
 test('strict no-follow child paths ignore symlinked prefixes outside the repository but reject internal symlinked parents', async (t) => {
   const temporary = await mkdtemp(join(tmpdir(), 'clarus-cli-support-test-'))
   t.after(() => rm(temporary, { recursive: true, force: true }))
@@ -1474,6 +1486,62 @@ test('a signal delivered after successful report publication leaves an interrupt
   assert.equal(emitted.status, 'interrupted')
   assert.equal(emitted.usable, false)
   assert.doesNotThrow(() => validateRunReport(emitted))
+})
+
+test('signal closeout never deletes a foreign run report that wins the owned-report race', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  const foreignContents = 'foreign-run-report-after-signal'
+  let published = false
+  let raced = false
+  harness.dependencies.link = async (fromPath, toPath) => {
+    await link(fromPath, toPath)
+    if (!published) {
+      published = true
+      harness.signalSource.emit('SIGTERM')
+    }
+  }
+  harness.dependencies.rename = async (fromPath, toPath) => {
+    if (published && fromPath.endsWith('/run.json') && !raced) {
+      raced = true
+      await unlink(fromPath)
+      await writeFile(fromPath, foreignContents)
+    }
+    return rename(fromPath, toPath)
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.usable, false)
+  assert.equal(raced, true)
+  assert.equal(await readFile(join(harness.output, 'run.json'), 'utf8'), foreignContents)
+})
+
+test('signal closeout removes the public completed report when failure staging fails', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let published = false
+  harness.dependencies.link = async (fromPath, toPath) => {
+    await link(fromPath, toPath)
+    if (!published) {
+      published = true
+      harness.signalSource.emit('SIGTERM')
+    }
+  }
+  harness.dependencies.writeNewFile = async (pathname, contents) => {
+    if (published && pathname.includes('/.run.json.')) {
+      throw Object.assign(new Error('failure report staging unavailable'), { code: 'EACCES' })
+    }
+    return writeNewFile(pathname, contents)
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.status, 'interrupted')
+  assert.equal(result.report.usable, false)
+  await assert.rejects(readFile(join(harness.output, 'run.json')), { code: 'ENOENT' })
 })
 
 test('a SIGTERM after the first report rename cannot publish a completed report', async (t) => {

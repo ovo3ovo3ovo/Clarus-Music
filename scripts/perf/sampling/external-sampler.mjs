@@ -196,7 +196,7 @@ function classifyToolFailure(result, phase, tool) {
 
 function toolTimeoutMs(phase, options) {
   if (phase === 'top') {
-    return Math.min(30 * 60 * 1000, (options.samples + 1) * options.intervalMs + 30000)
+    return (options.samples + 1) * options.intervalMs + 30000
   }
   if (phase === 'stack') {
     return Math.min(90 * 1000, options.stackDurationSeconds * 1000 + 30000)
@@ -1363,22 +1363,47 @@ export async function runExternalSampler(options, dependencies = {}) {
     }
     const stagingPath = join(outputPath, `.run.json.${randomUUID()}.staging`)
     const preparedPath = join(outputPath, `.run.json.${randomUUID()}.prepared`)
+    const backupPath = join(outputPath, `.run.json.${randomUUID()}.owned-backup`)
     let staged = true
     let prepared = false
+    let backupMoved = false
+    let backupOwned = false
     try {
+      if ((await inspectRunReportOwnership()) !== 'owned') {
+        return false
+      }
+      // Move the currently-owned inode out of the public name. If another
+      // writer wins the race between the ownership check and this rename, the
+      // moved inode will not match completedRunContents; restore it without
+      // deleting the foreign report and leave the replacement unpublished.
+      await renameArtifact(runPath(), backupPath)
+      backupMoved = true
+      const backupContents = await readNoFollowRegularFile(backupPath, {
+        label: 'owned completed run report backup',
+        maxBytes: OUTPUT_LIMIT_BYTES.total,
+      })
+      backupOwned = Boolean(completedRunContents && backupContents.equals(completedRunContents))
+      if (!backupOwned) {
+        try {
+          await linkArtifact(backupPath, runPath())
+          await unlinkArtifact(backupPath)
+          backupMoved = false
+        } catch {
+          // A foreign report may already occupy run.json. Never remove it or
+          // the backup when ownership cannot be proven.
+        }
+        return false
+      }
       await writeArtifact(stagingPath, contents)
       await renameArtifact(stagingPath, preparedPath)
       staged = false
       prepared = true
-      if ((await inspectRunReportOwnership()) !== 'owned') {
-        return false
-      }
-      // `link` is deliberately used for publication so a foreign report can
-      // never be overwritten. The owned completed inode is removed only after
-      // the ownership check immediately above; a concurrent foreign creator
-      // then causes the no-replace link to fail rather than being replaced.
-      await unlinkArtifact(runPath())
+      // `link` is a no-replace publication primitive. A foreign creator that
+      // appears after the rename therefore causes publication to fail rather
+      // than being overwritten.
       await linkArtifact(preparedPath, runPath())
+      await unlinkArtifact(backupPath)
+      backupMoved = false
       runReportOwned = false
       completedRunContents = null
       return true
@@ -1396,6 +1421,13 @@ export async function runExternalSampler(options, dependencies = {}) {
       if (prepared) {
         try {
           await unlinkArtifact(preparedPath)
+        } catch (error) {
+          if (error?.code !== 'ENOENT') reportCleanupError ??= error
+        }
+      }
+      if (backupMoved && backupOwned) {
+        try {
+          await unlinkArtifact(backupPath)
         } catch (error) {
           if (error?.code !== 'ENOENT') reportCleanupError ??= error
         }

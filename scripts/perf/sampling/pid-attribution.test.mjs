@@ -523,15 +523,17 @@ test('fails closed when realpath resolution of the root process fails', async ()
 })
 
 test('rejects arbitrary basename-only LaunchServices paths instead of trusting ps fallback', () => {
-  assert.throws(
-    () =>
-      parseLsappinfoInfo(
-        'pid=4102 bundleID="com.apple.WebKit.WebContent" executable path="evil-name" ASN:0x17',
-        {
-          fallbackPath: DEFAULT_HELPER_PATHS['web-content'],
-          fallbackRealpath: DEFAULT_HELPER_PATHS['web-content'],
-        },
-      ),
-    /basename|path/i,
-  )
+  for (const path of ['evil-name', '../com.apple.WebKit.WebContent']) {
+    assert.throws(
+      () =>
+        parseLsappinfoInfo(
+          `pid=4102 bundleID="com.apple.WebKit.WebContent" executable path="${path}" ASN:0x17`,
+          {
+            fallbackPath: DEFAULT_HELPER_PATHS['web-content'],
+            fallbackRealpath: DEFAULT_HELPER_PATHS['web-content'],
+          },
+        ),
+      /basename|path/i,
+    )
+  }
 })

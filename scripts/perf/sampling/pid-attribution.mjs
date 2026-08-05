@@ -497,7 +497,7 @@ export function parseLsappinfoInfo(output, { fallbackPath, fallbackRealpath } = 
     if (typeof fallbackPath !== 'string' || !isAbsolute(fallbackPath)) {
       fail('MALFORMED_LSAPPINFO', 'basename-only lsappinfo info requires an absolute ps fallback')
     }
-    if (basename(record.path) !== basename(fallbackPath)) {
+    if (record.path !== basename(record.path) || basename(record.path) !== basename(fallbackPath)) {
       fail('EXECUTABLE_MISMATCH', 'basename-only lsappinfo info disagrees with the ps executable')
     }
     record.path = fallbackPath
