@@ -229,12 +229,16 @@ export function createLocalPlayerQueuePersistence(
         const raw = storage.getItem(key)
         if (raw === null) return null
         const parsed = JSON.parse(raw) as UnknownRecord
+        const parsedRevision =
+          typeof parsed.revision === 'number' && Number.isSafeInteger(parsed.revision)
+            ? parsed.revision
+            : null
         let snapshot: PlayerQueueSnapshot | null
         if (
           parsed.storageVersion === SPLIT_STORAGE_VERSION &&
           parsed.storage === 'split' &&
-          Number.isSafeInteger(parsed.revision) &&
-          parsed.revision > 0
+          parsedRevision !== null &&
+          parsedRevision > 0
         ) {
           const queueRecord = JSON.parse(
             storage.getItem(queueKey) ?? 'null',
@@ -243,8 +247,8 @@ export function createLocalPlayerQueuePersistence(
           if (
             queueRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
             stateRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
-            queueRecord.revision !== parsed.revision ||
-            stateRecord.revision !== parsed.revision
+            queueRecord.revision !== parsedRevision ||
+            stateRecord.revision !== parsedRevision
           ) {
             snapshot = null
           } else {

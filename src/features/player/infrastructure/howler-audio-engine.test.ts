@@ -40,7 +40,7 @@ vi.mock('howler', () => ({
     }
 
     play(): number {
-      queueMicrotask(() => this.options.onplay?.())
+      queueMicrotask(() => (this.options.onplay as (() => void) | undefined)?.())
       return 1
     }
 

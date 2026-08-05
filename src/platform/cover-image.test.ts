@@ -66,7 +66,7 @@ describe('cover image preloading', () => {
         preloadCoverImages(`https://img.test/preload-${index}.jpg`)
       }
       expect(images.length).toBe(4)
-      images[0]?.listeners.load()
+      images[0]?.listeners.load?.()
       expect(images.length).toBe(5)
     } finally {
       vi.unstubAllGlobals()

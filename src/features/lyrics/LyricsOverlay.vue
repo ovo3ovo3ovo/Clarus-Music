@@ -486,11 +486,9 @@ function rebuildLyricLineCenters(): void {
     .sort(([left], [right]) => left - right)
     .map(([index, line]) => {
       const height = line.offsetHeight
-      const bounds = height > 0 ? null : line.getBoundingClientRect()
-      const center =
-        height > 0
-          ? line.offsetTop + height / 2
-          : container.scrollTop + bounds.top - containerBounds.top + bounds.height / 2
+      if (height > 0) return { index, center: line.offsetTop + height / 2 }
+      const bounds = line.getBoundingClientRect()
+      const center = container.scrollTop + bounds.top - containerBounds.top + bounds.height / 2
       return { index, center }
     })
     .filter(({ center }) => Number.isFinite(center))

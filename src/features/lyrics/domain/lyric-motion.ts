@@ -38,8 +38,10 @@ export function nearestLyricCenterIndex(
   let high = centers.length - 1
   while (low <= high) {
     const middle = low + Math.floor((high - low) / 2)
-    const center = centers[middle].center
-    if (center === target) return centers[middle].index
+    const current = centers[middle]
+    if (!current) return null
+    const center = current.center
+    if (center === target) return current.index
     if (center < target) low = middle + 1
     else high = middle - 1
   }
