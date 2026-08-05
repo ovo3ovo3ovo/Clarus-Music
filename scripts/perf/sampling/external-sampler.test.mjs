@@ -459,6 +459,13 @@ test('top and footprint parsers require complete fixed-PID numeric evidence and 
       physicalFootprintPeakBytes: 20,
     },
   )
+  assert.deepEqual(
+    parseFootprintOutput('    phys_footprint: 28492880 B\n    phys_footprint_peak: 33424464 B\n'),
+    {
+      physicalFootprintBytes: 28492880,
+      physicalFootprintPeakBytes: 33424464,
+    },
+  )
   assert.throws(() => parseTopOutput('PID CPU% TH\n4101 1% 1', { pids: [4101, 4102] }), /missing/i)
   assert.throws(() => parseFootprintOutput('Physical footprint: 10'), /peak/i)
   assert.throws(
@@ -607,11 +614,17 @@ test('runs deterministic external sampling with fixture verification, warmup rem
     '-l',
     '6',
     '-s',
-    '0.25',
+    '1',
     '-stats',
     'pid,cpu,threads',
     '-pid',
-    '4101,4102,4103,4104',
+    '4101',
+    '-pid',
+    '4102',
+    '-pid',
+    '4103',
+    '-pid',
+    '4104',
   ])
   for (const call of harness.calls) {
     assert.equal(call.options.shell, false)

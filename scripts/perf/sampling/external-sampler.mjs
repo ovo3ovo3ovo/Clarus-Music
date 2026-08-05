@@ -515,8 +515,12 @@ export function parseFootprintOutput(output) {
   let footprint
   let peak
   for (const line of lines) {
-    const current = /^\s*Physical\s+footprint:\s*([0-9,]+)(?:\s+bytes)?\s*$/i.exec(line)
-    const maximum = /^\s*Physical\s+footprint\s*\(peak\):\s*([0-9,]+)(?:\s+bytes)?\s*$/i.exec(line)
+    const current =
+      /^\s*(?:Physical\s+footprint|phys_footprint):\s*([0-9,]+)(?:\s+(?:bytes|B))?\s*$/i.exec(line)
+    const maximum =
+      /^\s*(?:Physical\s+footprint\s*\(peak\)|phys_footprint_peak):\s*([0-9,]+)(?:\s+(?:bytes|B))?\s*$/i.exec(
+        line,
+      )
     if (current) {
       if (footprint !== undefined) {
         samplingError(
@@ -1825,22 +1829,22 @@ export async function runExternalSampler(options, dependencies = {}) {
     }
     await fixtureIntegrityGuard.assertUnchanged('before-top')
     await closeFixture()
-    const top = await executeTool(
-      'top',
-      'top',
-      [
-        '-l',
-        String(options.samples + 1),
-        '-s',
-        String(options.intervalMs / 1000),
-        '-stats',
-        'pid,cpu,threads',
-        '-pid',
-        fixedPids.join(','),
-      ],
-      'top',
-      false,
-      ({ stdout }) => parseTopOutput(stdout.toString('utf8'), { pids: fixedPids }),
+    const topArguments = [
+      '-l',
+      String(options.samples + 1),
+      '-s',
+      String(Math.max(1, Math.ceil(options.intervalMs / 1000))),
+      '-stats',
+      'pid,cpu,threads',
+      '-pid',
+    ]
+    for (const pid of fixedPids) {
+      topArguments.push(String(pid))
+      topArguments.push('-pid')
+    }
+    topArguments.pop()
+    const top = await executeTool('top', 'top', topArguments, 'top', false, ({ stdout }) =>
+      parseTopOutput(stdout.toString('utf8'), { pids: fixedPids }),
     )
     await fixtureIntegrityGuard.assertUnchanged('top')
     if (top.parsed.length !== options.samples + 1) {

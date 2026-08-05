@@ -8,6 +8,7 @@ import {
   assertExpectedReleaseBundle,
   attributeProcessTree,
   parseLsappinfoApplications,
+  parseLsappinfoInfo,
   parsePsSnapshot,
   readReleaseBundle,
   revalidateAttribution,
@@ -324,4 +325,81 @@ test('accepts launchd PID 1 in a process snapshot while keeping attribution root
       { pid: 4101, ppid: 1 },
     ],
   )
+})
+
+test('parses macOS lsappinfo list blocks by executable path and coalition', () => {
+  const realExecutable =
+    '/private/tmp/clarus-music-performance-phase-1/src-tauri/target/release/bundle/macos/Clarus Music.app/Contents/MacOS/simplemusic'
+  const records = parseLsappinfoApplications(`
+96) "Clarus Music" ASN:0x0-0x90a90a:
+    bundleID="com.ovo3ovo3ovo.clarusmusic"
+    bundle path="/private/tmp/clarus-music-performance-phase-1/src-tauri/target/release/bundle/macos/Clarus Music.app"
+    executable path="${realExecutable}"
+    pid = 92504 type="Foreground"
+    coalition: 26560
+97) "Clarus Music Networking" ASN:0x0-0x90b90b:
+    bundleID="com.apple.WebKit.Networking"
+    bundle path="/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc"
+    executable path="/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+    pid = 92509 type="UIElement"
+    coalition: 26561
+98) "Clarus Music Web Content" ASN:0x0-0x90d90d:
+    bundleID="com.apple.WebKit.WebContent"
+    bundle path=[ NULL ]
+    executable path="com.apple.WebKit.WebContent"
+    pid = 92510 type="UIElement"
+    coalition: 26562
+`)
+  assert.deepEqual(records, [
+    {
+      pid: 92504,
+      path: realExecutable,
+      realpath: realExecutable,
+      bundleId: 'com.ovo3ovo3ovo.clarusmusic',
+      coalition: { id: '26560', asn: '0x0-0x90a90a:' },
+    },
+    {
+      pid: 92509,
+      path: '/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking',
+      realpath:
+        '/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking',
+      bundleId: 'com.apple.WebKit.Networking',
+      coalition: { id: '26561', asn: '0x0-0x90b90b:' },
+    },
+  ])
+})
+
+test('parses a real lsappinfo info record using executable path rather than bundle path', () => {
+  const realExecutable =
+    '/private/tmp/clarus-music-performance-phase-1/src-tauri/target/release/bundle/macos/Clarus Music.app/Contents/MacOS/simplemusic'
+  const record = parseLsappinfoInfo(`
+"Clarus Music" ASN:0x0-0x90a90a:
+    bundleID="com.ovo3ovo3ovo.clarusmusic"
+    bundle path="/private/tmp/clarus-music-performance-phase-1/src-tauri/target/release/bundle/macos/Clarus Music.app"
+    executable path="${realExecutable}"
+    pid = 92504
+    coalition: 26560
+`)
+  assert.equal(record.path, realExecutable)
+  assert.equal(record.bundleId, 'com.ovo3ovo3ovo.clarusmusic')
+  assert.deepEqual(record.coalition, { id: '26560', asn: '0x0-0x90a90a:' })
+})
+
+test('maps a basename-only WebContent info path to the verified ps executable', () => {
+  const record = parseLsappinfoInfo(
+    `
+"Clarus Music Web Content" ASN:0x0-0x90d90d:
+    bundleID="com.apple.WebKit.WebContent"
+    bundle path=[ NULL ]
+    executable path="com.apple.WebKit.WebContent"
+    pid = 92510
+    coalition: 26562
+`,
+    {
+      fallbackPath: DEFAULT_HELPER_PATHS['web-content'],
+      fallbackRealpath: DEFAULT_HELPER_PATHS['web-content'],
+    },
+  )
+  assert.equal(record.path, DEFAULT_HELPER_PATHS['web-content'])
+  assert.equal(record.realpath, DEFAULT_HELPER_PATHS['web-content'])
 })

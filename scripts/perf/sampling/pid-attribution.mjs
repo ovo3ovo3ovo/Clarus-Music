@@ -398,10 +398,12 @@ function parseKeyValueBlock(block) {
   const result = {}
   const expressions = {
     pid: /(?:^|\n|[;,])\s*(?:pid|PID)\s*[:=]\s*(\d+)/m,
-    path: /(?:executable(?:\s+path)?|path)\s*[:=]\s*["']?([^"'\n;,]+)["']?/i,
+    executablePath: /(?:^|\n)\s*executable\s+path\s*[:=]\s*["']?([^"'\n;,]+)["']?/im,
+    path: /(?:^|\n)\s*path\s*[:=]\s*["']?([^"'\n;,]+)["']?/im,
     realpath: /(?:realpath|real\s+path)\s*[:=]\s*["']?([^"'\n;,]+)["']?/i,
     bundleId: /(?:bundleID|bundleId|bundle\s+id)\s*[:=]\s*["']?([^"'\n;,]+)["']?/i,
-    coalitionId: /(?:coalition(?:\s+id)?)\s*[:=]\s*["']?([^"'\n;,]+)["']?/i,
+    coalitionId: /(?:coalition(?:\s+id)?)\s*[:=]\s*["']?([^\s{"'\n;,]+)["']?/i,
+    coalitionMembers: /(?:coalition(?:\s+id)?)\s*[:=][^\n{]*\{([^}]*)\}/i,
     asn: /(?:ASN|asn)\s*[:=]\s*["']?([^"'\n;,]+)["']?/i,
   }
   for (const [key, expression] of Object.entries(expressions)) {
@@ -409,6 +411,9 @@ function parseKeyValueBlock(block) {
     if (match) {
       result[key] = match[1].trim()
     }
+  }
+  if (result.executablePath) {
+    result.path = result.executablePath
   }
   if (result.pid) {
     result.pid = Number(result.pid)
@@ -421,6 +426,12 @@ function parseKeyValueBlock(block) {
       id: result.coalitionId ?? `asn:${result.asn}`,
       asn: result.asn,
     }
+  }
+  if (result.coalitionMembers) {
+    result.coalitionMembers = result.coalitionMembers
+      .split(/\s+/)
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value) && value > 1)
   }
   return result
 }
@@ -442,9 +453,11 @@ function parseLsappinfoText(output, label) {
       throw error
     }
   }
-  const blocks = /(^|\n)\s*ASN\s*[:=]/im.test(trimmed)
-    ? trimmed.split(/(?=^\s*ASN\s*[:=])/im).filter((block) => block.trim())
-    : trimmed.split(/\n\s*\n/).filter(Boolean)
+  const blocks = /^\s*\d+\)\s/m.test(trimmed)
+    ? trimmed.split(/(?=^\s*\d+\)\s)/m).filter((block) => block.trim())
+    : /(^|\n)\s*ASN\s*[:=]/im.test(trimmed)
+      ? trimmed.split(/(?=^\s*ASN\s*[:=])/im).filter((block) => block.trim())
+      : trimmed.split(/\n\s*\n/).filter(Boolean)
   const records = blocks.map(parseKeyValueBlock).filter((record) => Object.keys(record).length > 0)
   if (records.length === 0) {
     fail('MALFORMED_LSAPPINFO', `${label} output is malformed`)
@@ -453,15 +466,43 @@ function parseLsappinfoText(output, label) {
 }
 
 export function parseLsappinfoApplications(output) {
-  return normaliseApplications(parseLsappinfoText(output, 'lsappinfo list'))
+  const rawRecords = parseLsappinfoText(output, 'lsappinfo list')
+  const records = rawRecords.filter(
+    (record) => typeof record.path === 'string' && isAbsolute(record.path),
+  )
+  if (records.length === 0) {
+    fail('MALFORMED_LSAPPINFO', 'lsappinfo list contains no attributable records')
+  }
+  const normalized = normaliseApplications(records)
+  for (const [index, record] of records.entries()) {
+    if (Array.isArray(record.coalitionMembers) && record.coalitionMembers.length > 0) {
+      Object.defineProperty(normalized[index].coalition, 'members', {
+        configurable: false,
+        enumerable: false,
+        value: Object.freeze([...record.coalitionMembers]),
+        writable: false,
+      })
+    }
+  }
+  return normalized
 }
 
-export function parseLsappinfoInfo(output) {
+export function parseLsappinfoInfo(output, { fallbackPath, fallbackRealpath } = {}) {
   const records = parseLsappinfoText(output, 'lsappinfo info')
   if (records.length !== 1) {
     fail('MALFORMED_LSAPPINFO', 'lsappinfo info must contain exactly one process record')
   }
-  return normaliseLsRecord(records[0], 'lsappinfo info record')
+  const record = { ...records[0] }
+  if (
+    typeof record.path === 'string' &&
+    !isAbsolute(record.path) &&
+    typeof fallbackPath === 'string' &&
+    isAbsolute(fallbackPath)
+  ) {
+    record.path = fallbackPath
+    record.realpath = fallbackRealpath ?? fallbackPath
+  }
+  return normaliseLsRecord(record, 'lsappinfo info record')
 }
 
 function assertSameProcessIdentity(previous, current, label) {
@@ -754,27 +795,67 @@ export async function captureMacosAttribution({
   // must not make an otherwise valid app snapshot malformed. Keep only
   // absolute-path records; selected app/WebKit roles still fail closed if
   // their own paths are unavailable.
-  for (const record of rawSnapshot.filter(({ path }) => path.startsWith('/'))) {
+  const effectiveHelperPaths = {}
+  for (const role of ['web-content', 'gpu', 'networking']) {
+    const expectedPath = helperPaths?.[role] ?? DEFAULT_HELPER_PATHS[role]
+    assertPath(expectedPath, `canonical ${role} helper path`)
+    try {
+      effectiveHelperPaths[role] = await resolveRealpath(expectedPath)
+    } catch {
+      effectiveHelperPaths[role] = expectedPath
+    }
+  }
+  for (const record of rawSnapshot.filter(({ pid, path }) => pid > 1 && path.startsWith('/'))) {
     let resolved
     try {
       resolved = await resolveRealpath(record.path)
     } catch {
       resolved = record.path
     }
-    snapshot.push({ ...record, realpath: resolved })
+    snapshot.push({ ...record, path: resolved, realpath: resolved })
   }
   const listed = await invoke(runCommand, '/usr/bin/lsappinfo', ['list'])
   const applications = parseLsappinfoApplications(String(listed?.stdout ?? ''))
   const infoByPid = new Map()
-  for (const process of snapshot) {
+  const helperBasenames = new Set(
+    Object.values(effectiveHelperPaths).map((pathname) => basename(pathname)),
+  )
+  const infoCandidates = snapshot.filter(
+    (process) => process.pid === rootPid || helperBasenames.has(basename(process.path)),
+  )
+  for (const process of infoCandidates) {
     const inspected = await invoke(runCommand, '/usr/bin/lsappinfo', [
       'info',
       '-pid',
       String(process.pid),
     ])
-    infoByPid.set(process.pid, parseLsappinfoInfo(String(inspected?.stdout ?? '')))
+    const parsed = parseLsappinfoInfo(String(inspected?.stdout ?? ''), {
+      fallbackPath: process.path,
+      fallbackRealpath: process.realpath,
+    })
+    infoByPid.set(process.pid, parsed)
   }
-  return attributeProcessTree({ rootPid, bundle, snapshot, applications, infoByPid, helperPaths })
+  const rootApplication = applications.find((record) => record.pid === rootPid)
+  const rootMembers = new Set(rootApplication?.coalition?.members ?? [])
+  const rootInfo = infoByPid.get(rootPid)
+  if (rootInfo && rootMembers.size > 0) {
+    for (const process of infoCandidates) {
+      if (process.pid !== rootPid && rootMembers.has(process.pid)) {
+        const processInfo = infoByPid.get(process.pid)
+        if (processInfo) {
+          processInfo.coalition = { ...rootInfo.coalition }
+        }
+      }
+    }
+  }
+  return attributeProcessTree({
+    rootPid,
+    bundle,
+    snapshot,
+    applications,
+    infoByPid,
+    helperPaths: effectiveHelperPaths,
+  })
 }
 
 export const MACOS_FIXED_TOOLS = Object.freeze({
