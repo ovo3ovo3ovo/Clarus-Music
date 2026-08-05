@@ -1032,27 +1032,31 @@ pub async fn lookup_audio_cache(
     let root = cache_root(&app)?;
     let inner = Arc::clone(&state.inner);
     let _operation = inner.operation_lock.lock().await;
-    let mut resident = inner.resident_index.lock().await;
-    ensure_resident_index(&root, &inner, &mut resident).await?;
-    let resident_index = resident.as_mut().expect("resident index is initialized");
-    let trimmed = trim_resident_index(
-        &root,
-        &inner,
-        &mut resident_index.index,
-        inner.cache_limit_bytes.load(Ordering::Acquire),
-    )
-    .await?;
-    if trimmed.0 > 0 {
-        resident_index.access_updates = 0;
-        resident_index.access_flush_ms = now_ms();
-    }
     let key = cache_key(track_id, &quality);
-    let Some(entry) = resident_index.index.entries.get(&key) else {
-        return Ok(None);
+    let (file_name, mime_type, size_bytes) = {
+        let mut resident = inner.resident_index.lock().await;
+        ensure_resident_index(&root, &inner, &mut resident).await?;
+        let resident_index = resident.as_mut().expect("resident index is initialized");
+        let trimmed = trim_resident_index(
+            &root,
+            &inner,
+            &mut resident_index.index,
+            inner.cache_limit_bytes.load(Ordering::Acquire),
+        )
+        .await?;
+        if trimmed.0 > 0 {
+            resident_index.access_updates = 0;
+            resident_index.access_flush_ms = now_ms();
+        }
+        let Some(entry) = resident_index.index.entries.get(&key) else {
+            return Ok(None);
+        };
+        (
+            entry.file_name.clone(),
+            entry.mime_type.clone(),
+            entry.size_bytes,
+        )
     };
-    let file_name = entry.file_name.clone();
-    let mime_type = entry.mime_type.clone();
-    let size_bytes = entry.size_bytes;
     let file_path = root.join(&file_name);
     let valid_file = match fs::metadata(&file_path).await {
         Ok(metadata) => metadata.is_file() && metadata.len() == size_bytes,
@@ -1060,12 +1064,16 @@ pub async fn lookup_audio_cache(
         Err(error) => return Err(CacheFailure::io("inspect", error)),
     };
     if !valid_file {
-        let mut next = resident_index.index.clone();
-        next.entries.remove(&key);
-        write_index(&root, &next).await?;
-        resident_index.index = next;
-        resident_index.access_updates = 0;
-        resident_index.access_flush_ms = now_ms();
+        {
+            let mut resident = inner.resident_index.lock().await;
+            let resident_index = resident.as_mut().expect("resident index is initialized");
+            let mut next = resident_index.index.clone();
+            next.entries.remove(&key);
+            write_index(&root, &next).await?;
+            resident_index.index = next;
+            resident_index.access_updates = 0;
+            resident_index.access_flush_ms = now_ms();
+        }
         let _ = fs::remove_file(&file_path).await;
         return Ok(None);
     }
@@ -1073,7 +1081,11 @@ pub async fn lookup_audio_cache(
         .to_str()
         .ok_or_else(|| CacheFailure::corruption("The cached audio path is not valid UTF-8"))?
         .to_string();
-    record_entry_access(&root, resident_index, &key, now_ms()).await?;
+    {
+        let mut resident = inner.resident_index.lock().await;
+        let resident_index = resident.as_mut().expect("resident index is initialized");
+        record_entry_access(&root, resident_index, &key, now_ms()).await?;
+    }
     let lease_id = register_lease(&inner, key, file_name).await?;
     Ok(Some(CachedAudioSource {
         file_path,
