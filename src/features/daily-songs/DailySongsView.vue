@@ -38,6 +38,7 @@ import { useI18n } from 'vue-i18n'
 import ContentLoadingVeil from '@/components/common/ContentLoadingVeil.vue'
 import { useAuthStore } from '@/features/auth/application/auth-store'
 import { NativeCatalogGateway } from '@/features/catalog/infrastructure/native-catalog'
+import { releaseAudioSource } from '@/features/player/domain/audio-engine'
 import { usePlayerStore } from '@/features/player/application/player-store'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import VirtualTrackList from '@/features/search/presentation/VirtualTrackList.vue'
@@ -108,7 +109,10 @@ async function playTrack(track: Track): Promise<void> {
       settingsStore.settings.musicQuality,
       controller.signal,
     )
-    if (playbackController !== controller) return
+    if (playbackController !== controller) {
+      releaseAudioSource(source)
+      return
+    }
     player.setQueue(selection.queue, selection.index, 'daily:songs')
     await player.load(selection.track, source, true, controller.signal)
   } catch (reason) {

@@ -91,7 +91,10 @@ export class HowlerAudioEngine implements AudioEngine {
     this.assertActive()
     this.cancelPendingLoad()
     this.releaseSource()
-    if (signal?.aborted) throw abortError(signal.reason)
+    if (signal?.aborted) {
+      if (source.kind === 'managed-url') source.release()
+      throw abortError(signal.reason)
+    }
 
     const controller = new AbortController()
     this.loadController = controller

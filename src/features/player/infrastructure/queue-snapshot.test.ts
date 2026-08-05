@@ -90,9 +90,68 @@ describe('player queue snapshots', () => {
     persistence.save(initial)
     persistence.save({ ...initial, volume: 0.2, progress: 12 })
 
-    expect(storage.setItem.mock.calls.filter(([key]) => key === 'queue.queue')).toHaveLength(1)
-    expect(storage.setItem.mock.calls.filter(([key]) => key === 'queue.state')).toHaveLength(2)
+    expect(
+      storage.setItem.mock.calls.filter(([key]) => key.startsWith('queue.queue')),
+    ).toHaveLength(1)
+    expect(
+      storage.setItem.mock.calls.filter(([key]) => key.startsWith('queue.state')),
+    ).toHaveLength(2)
     expect(persistence.load()).toEqual({ ...initial, volume: 0.2, progress: 12 })
+  })
+
+  it('rehydrates split bookkeeping after a reload', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const initial = snapshot()
+    createLocalPlayerQueuePersistence(storage, 'queue').save(initial)
+
+    const reloaded = createLocalPlayerQueuePersistence(storage, 'queue')
+    const restored = reloaded.load()
+    expect(restored).toEqual(initial)
+    expect(restored).not.toBeNull()
+    reloaded.save({ ...restored!, volume: 0.2, progress: 12 })
+
+    expect(
+      storage.setItem.mock.calls.filter(([key]) => key.startsWith('queue.queue')),
+    ).toHaveLength(1)
+    expect(
+      storage.setItem.mock.calls.filter(([key]) => key.startsWith('queue.state')),
+    ).toHaveLength(2)
+    expect(reloaded.load()).toEqual({ ...initial, volume: 0.2, progress: 12 })
+  })
+
+  it('keeps the last committed snapshot when a split write is interrupted', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const initial = snapshot()
+    createLocalPlayerQueuePersistence(storage, 'queue').save(initial)
+
+    // A crash after publishing a new record but before publishing its marker
+    // must leave the marker-referenced generation available for reload.
+    values.set(
+      'queue.queue.2',
+      JSON.stringify({
+        storageVersion: 1,
+        revision: 2,
+        queue: initial.queue,
+        playNextQueue: initial.playNextQueue,
+        playbackOrder: initial.playbackOrder,
+        queueSource: initial.queueSource,
+      }),
+    )
+
+    const restored = createLocalPlayerQueuePersistence(storage, 'queue').load()
+    expect(restored).toEqual(initial)
+    expect(values.has('queue')).toBe(true)
+    expect(values.has('queue.queue.1')).toBe(true)
   })
 
   it('keeps the previous split snapshot when a later storage write fails', () => {
@@ -101,7 +160,7 @@ describe('player queue snapshots', () => {
     const storage = {
       getItem: vi.fn((key: string) => values.get(key) ?? null),
       setItem: vi.fn((key: string, value: string) => {
-        if (failStateWrite && key === 'queue.state') throw new Error('quota')
+        if (failStateWrite && key.startsWith('queue.state')) throw new Error('quota')
         values.set(key, value)
       }),
       removeItem: vi.fn((key: string) => values.delete(key)),
@@ -113,5 +172,63 @@ describe('player queue snapshots', () => {
 
     expect(() => persistence.save({ ...initial, volume: 0.1 })).toThrow('quota')
     expect(createLocalPlayerQueuePersistence(storage, 'queue').load()).toEqual(initial)
+  })
+
+  it('loads the previous fixed-key split format before migrating on save', () => {
+    const values = new Map<string, string>([
+      ['queue', JSON.stringify({ storageVersion: 1, storage: 'split', revision: 7 })],
+      [
+        'queue.queue',
+        JSON.stringify({
+          storageVersion: 1,
+          revision: 7,
+          queue: snapshot().queue,
+          playNextQueue: snapshot().playNextQueue,
+          playbackOrder: snapshot().playbackOrder,
+          queueSource: snapshot().queueSource,
+        }),
+      ],
+      [
+        'queue.state',
+        JSON.stringify({
+          storageVersion: 1,
+          revision: 7,
+          currentTrack: snapshot().currentTrack,
+          currentIndex: snapshot().currentIndex,
+          currentIsPlayNext: snapshot().currentIsPlayNext,
+          repeatMode: snapshot().repeatMode,
+          shuffle: snapshot().shuffle,
+          reversed: snapshot().reversed,
+          volume: snapshot().volume,
+          progress: snapshot().progress,
+        }),
+      ],
+    ])
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+
+    const persistence = createLocalPlayerQueuePersistence(storage, 'queue')
+    expect(persistence.load()).toEqual(snapshot())
+    persistence.save({ ...snapshot(), volume: 0.2 })
+    expect(values.has('queue.queue.1')).toBe(true)
+    expect(values.has('queue.state.1')).toBe(true)
+  })
+
+  it('preserves clear errors while attempting to remove all split records', () => {
+    const storage = {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn((key: string) => {
+        if (key === 'queue') throw new Error('storage disabled')
+      }),
+    }
+    const persistence = createLocalPlayerQueuePersistence(storage, 'queue')
+
+    expect(() => persistence.clear()).toThrow('storage disabled')
+    expect(storage.removeItem).toHaveBeenCalledWith('queue.queue')
+    expect(storage.removeItem).toHaveBeenCalledWith('queue.state')
   })
 })

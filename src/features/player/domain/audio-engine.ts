@@ -6,6 +6,10 @@ export type AudioSource =
   | Readonly<{ kind: 'managed-url'; url: string; mimeType: string; release: () => void }>
   | Readonly<{ kind: 'bytes'; bytes: ArrayBuffer; mimeType: string }>
 
+export function releaseAudioSource(source: AudioSource): void {
+  if (source.kind === 'managed-url') source.release()
+}
+
 export interface AudioEngineEventMap {
   state: AudioEngineState
   duration: number

@@ -204,6 +204,7 @@ import { useAuthStore } from '@/features/auth/application/auth-store'
 import ArtistList from '@/features/catalog/presentation/ArtistList.vue'
 import { NativeCatalogGateway } from '@/features/catalog/infrastructure/native-catalog'
 import type { ArtistCard } from '@/features/catalog/domain/catalog'
+import { releaseAudioSource } from '@/features/player/domain/audio-engine'
 import { usePlayerStore } from '@/features/player/application/player-store'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import VirtualTrackList from '@/features/search/presentation/VirtualTrackList.vue'
@@ -327,7 +328,10 @@ async function loadSelection(
     settingsStore.settings.musicQuality,
     controller.signal,
   )
-  if (playbackController !== controller) return
+  if (playbackController !== controller) {
+    releaseAudioSource(source)
+    return
+  }
   player.setQueue(selection.queue, selection.index, queueSource)
   await player.load(selection.track, source, true, controller.signal)
 }

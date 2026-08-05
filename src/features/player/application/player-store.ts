@@ -5,7 +5,12 @@ import { useSettingsStore } from '@/features/settings/application/settings-store
 import type { MusicQuality } from '@/features/settings/domain/settings'
 import { preloadCoverImages } from '@/platform/cover-image'
 import type { RepeatMode, Track } from '@/types/music'
-import type { AudioEngine, AudioEngineState, AudioSource } from '../domain/audio-engine'
+import {
+  releaseAudioSource,
+  type AudioEngine,
+  type AudioEngineState,
+  type AudioSource,
+} from '../domain/audio-engine'
 import {
   createShuffledOrder,
   cycleRepeatMode as nextRepeatMode,
@@ -308,8 +313,18 @@ export function createPlayerStore(
       signal?.addEventListener('abort', forwardAbort, { once: true })
       if (signal?.aborted) forwardAbort()
 
+      let sourceReleased = false
+      const releaseSource = (): void => {
+        if (sourceReleased || source.kind !== 'managed-url') return
+        sourceReleased = true
+        source.release()
+      }
+      const engineSource =
+        source.kind === 'managed-url' ? { ...source, release: releaseSource } : source
+      let sourceTransferred = false
       try {
-        await engine.load(source, controller.signal)
+        await engine.load(engineSource, controller.signal)
+        sourceTransferred = true
         if (activeLoad.value !== controller) return
         currentTrack.value = track
         preloadCoverImages(track.album.coverUrl)
@@ -323,6 +338,7 @@ export function createPlayerStore(
         syncMediaPosition(0)
         if (autoplay) await engine.play()
       } finally {
+        if (!sourceTransferred) releaseSource()
         signal?.removeEventListener('abort', forwardAbort)
         if (activeLoad.value === controller) activeLoad.value = null
       }
@@ -411,7 +427,10 @@ export function createPlayerStore(
           settingsStore.settings.musicQuality,
           controller.signal,
         )
-        if (navigationController !== controller) return false
+        if (navigationController !== controller) {
+          releaseAudioSource(source)
+          return false
+        }
         await loadAudio(track, source, true, controller.signal)
         if (navigationController !== controller) return false
         commit()
@@ -544,7 +563,10 @@ export function createPlayerStore(
             settingsStore.settings.musicQuality,
             controller.signal,
           )
-          if (navigationController !== controller) return
+          if (navigationController !== controller) {
+            releaseAudioSource(source)
+            return
+          }
           await loadAudio(track, source, false, controller.signal)
           if (navigationController !== controller) return
           if (resumeAt > 0) seek(resumeAt)

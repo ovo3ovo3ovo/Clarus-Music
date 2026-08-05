@@ -72,6 +72,7 @@ import { usePlayerStore } from '@/features/player/application/player-store'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import type { SearchOverview, SearchType } from '@/features/catalog/domain/catalog'
 import { NativeCatalogGateway } from '@/features/catalog/infrastructure/native-catalog'
+import { releaseAudioSource } from '@/features/player/domain/audio-engine'
 import ArtistList from '@/features/catalog/presentation/ArtistList.vue'
 import CatalogCoverGrid from '@/features/catalog/presentation/CatalogCoverGrid.vue'
 import MusicVideoGrid from '@/features/catalog/presentation/MusicVideoGrid.vue'
@@ -193,7 +194,10 @@ async function playTrack(track: Track): Promise<void> {
       settingsStore.settings.musicQuality,
       controller.signal,
     )
-    if (playbackController !== controller) return
+    if (playbackController !== controller) {
+      releaseAudioSource(source)
+      return
+    }
     player.setQueue(selection.queue, selection.index)
     await player.load(selection.track, source, true, controller.signal)
   } catch (error) {

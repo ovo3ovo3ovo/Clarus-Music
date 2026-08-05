@@ -339,6 +339,37 @@ describe('player queue navigation', () => {
     expect(player.currentTrack?.id).toBe(2)
   })
 
+  it('releases a managed source resolved after its navigation was superseded', async () => {
+    let call = 0
+    let resolveFirst: ((source: AudioSource) => void) | undefined
+    const release = vi.fn()
+    const resolveStream = vi.fn((id: number) => {
+      call += 1
+      if (call === 1) {
+        return new Promise<AudioSource>((resolve) => {
+          resolveFirst = resolve
+        })
+      }
+      return Promise.resolve({ kind: 'remote', url: `https://a/${id}` } as AudioSource)
+    })
+    const { player } = setup(resolveStream)
+    await player.load(track(1), { kind: 'remote', url: 'https://a/1' }, false)
+    player.setQueue([track(1), track(2)], 0)
+
+    const first = player.next()
+    resolveFirst?.({
+      kind: 'managed-url',
+      url: 'asset://localhost/song.mp3',
+      mimeType: 'audio/mpeg',
+      release,
+    })
+    const second = player.next()
+
+    await expect(first).resolves.toBe(false)
+    await expect(second).resolves.toBe(true)
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it('lets a direct page selection cancel an older queue navigation', async () => {
     const resolveStream = vi.fn(
       (_id: number, _quality: string, signal?: AbortSignal) =>

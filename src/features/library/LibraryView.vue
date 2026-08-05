@@ -172,6 +172,7 @@ import type { AlbumCard, ArtistCard } from '@/features/catalog/domain/catalog'
 import { NativeCatalogGateway } from '@/features/catalog/infrastructure/native-catalog'
 import ArtistList from '@/features/catalog/presentation/ArtistList.vue'
 import CatalogCoverGrid from '@/features/catalog/presentation/CatalogCoverGrid.vue'
+import { releaseAudioSource } from '@/features/player/domain/audio-engine'
 import { usePlayerStore } from '@/features/player/application/player-store'
 import {
   PLAYLIST_PAGE_SIZE,
@@ -486,7 +487,10 @@ async function playPlaylistDetail(detail: PlaylistDetail, selectedTrackId?: numb
       settingsStore.settings.musicQuality,
       controller.signal,
     )
-    if (playbackController !== controller) return
+    if (playbackController !== controller) {
+      releaseAudioSource(source)
+      return
+    }
     player.setQueue(selection.queue, selection.index, sourceKey)
     await player.load(selection.track, source, true, controller.signal)
     const hydration = new AbortController()
@@ -543,7 +547,10 @@ async function playCollectionTrack(
       settingsStore.settings.musicQuality,
       controller.signal,
     )
-    if (playbackController !== controller) return
+    if (playbackController !== controller) {
+      releaseAudioSource(source)
+      return
+    }
     player.setQueue(selection.queue, selection.index, sourceKey)
     await player.load(selection.track, source, true, controller.signal)
   } catch (reason) {

@@ -553,19 +553,36 @@ async fn record_entry_access(
     key: &str,
     accessed_ms: u64,
 ) -> Result<(), CacheFailure> {
-    let entry = resident
-        .index
-        .entries
-        .get_mut(key)
-        .ok_or_else(|| CacheFailure::corruption("The cached audio entry disappeared"))?;
-    entry.last_accessed_ms = accessed_ms;
-    resident.access_updates = resident.access_updates.saturating_add(1);
-    if resident.access_updates < ACCESS_FLUSH_HITS
-        && accessed_ms.saturating_sub(resident.access_flush_ms) < ACCESS_FLUSH_INTERVAL_MS
-    {
+    if !resident.index.entries.contains_key(key) {
+        return Err(CacheFailure::corruption(
+            "The cached audio entry disappeared",
+        ));
+    }
+    let next_updates = resident.access_updates.saturating_add(1);
+    let should_flush = next_updates >= ACCESS_FLUSH_HITS
+        || accessed_ms.saturating_sub(resident.access_flush_ms) >= ACCESS_FLUSH_INTERVAL_MS;
+    if !should_flush {
+        let entry = resident
+            .index
+            .entries
+            .get_mut(key)
+            .expect("cache entry presence was checked above");
+        entry.last_accessed_ms = accessed_ms;
+        resident.access_updates = next_updates;
         return Ok(());
     }
-    write_index(root, &resident.index).await?;
+
+    // Publish a clone first. If the atomic write fails, the resident index and
+    // retry counters remain aligned with the durable file rather than
+    // appearing newer than storage.
+    let mut next_index = resident.index.clone();
+    next_index
+        .entries
+        .get_mut(key)
+        .expect("cache entry presence was checked above")
+        .last_accessed_ms = accessed_ms;
+    write_index(root, &next_index).await?;
+    resident.index = next_index;
     resident.access_updates = 0;
     resident.access_flush_ms = accessed_ms;
     Ok(())
@@ -1027,7 +1044,6 @@ pub async fn lookup_audio_cache(
     .await?;
     if trimmed.0 > 0 {
         resident_index.access_updates = 0;
-        resident_index.access_flush_ms = now_ms();
         resident_index.access_flush_ms = now_ms();
     }
     let key = cache_key(track_id, &quality);

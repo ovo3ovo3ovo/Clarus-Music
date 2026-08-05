@@ -199,8 +199,11 @@ export function createLocalPlayerQueuePersistence(
 ): PlayerQueuePersistence {
   const queueKey = `${key}${SPLIT_QUEUE_SUFFIX}`
   const stateKey = `${key}${SPLIT_STATE_SUFFIX}`
-  let revision = 0
-  let markerRevision: number | null = null
+  const versionedKey = (base: string, revision: number): string => `${base}.${revision}`
+  let queueRevision = 0
+  let stateRevision = 0
+  let obsoleteQueueRevision = 0
+  let obsoleteStateRevision = 0
   let lastStructure:
     | {
         readonly queue: readonly Track[]
@@ -210,17 +213,48 @@ export function createLocalPlayerQueuePersistence(
       }
     | undefined
 
-  const clearStoredRecords = (): void => {
-    for (const storageKey of [key, queueKey, stateKey]) {
+  const clearStoredRecords = (propagateErrors = false): void => {
+    let firstError: unknown = null
+    const storageKeys = new Set([key, queueKey, stateKey])
+    for (const revision of [queueRevision, obsoleteQueueRevision]) {
+      if (revision > 0) storageKeys.add(versionedKey(queueKey, revision))
+    }
+    for (const revision of [stateRevision, obsoleteStateRevision]) {
+      if (revision > 0) storageKeys.add(versionedKey(stateKey, revision))
+    }
+    for (const storageKey of storageKeys) {
       try {
         storage.removeItem(storageKey)
-      } catch {
+      } catch (error) {
+        if (firstError === null) firstError = error
         // Storage can be disabled by WebView policy.
       }
     }
-    revision = 0
-    markerRevision = null
+    queueRevision = 0
+    stateRevision = 0
+    obsoleteQueueRevision = 0
+    obsoleteStateRevision = 0
     lastStructure = undefined
+    if (propagateErrors && firstError !== null) throw firstError
+  }
+
+  const removeObsoleteRecords = (): void => {
+    const storageKeys = new Set<string>([queueKey, stateKey])
+    if (obsoleteQueueRevision > 0) {
+      storageKeys.add(versionedKey(queueKey, obsoleteQueueRevision))
+    }
+    if (obsoleteStateRevision > 0) {
+      storageKeys.add(versionedKey(stateKey, obsoleteStateRevision))
+    }
+    for (const storageKey of storageKeys) {
+      try {
+        storage.removeItem(storageKey)
+      } catch {
+        // The new marker is already durable; stale records are harmless.
+      }
+    }
+    obsoleteQueueRevision = 0
+    obsoleteStateRevision = 0
   }
 
   return {
@@ -229,17 +263,58 @@ export function createLocalPlayerQueuePersistence(
         const raw = storage.getItem(key)
         if (raw === null) return null
         const parsed = JSON.parse(raw) as UnknownRecord
-        const parsedRevision =
-          typeof parsed.revision === 'number' && Number.isSafeInteger(parsed.revision)
-            ? parsed.revision
-            : null
+        const parsedRevision = positiveInteger(parsed.revision) ? parsed.revision : null
+        const parsedQueueRevision = positiveInteger(parsed.queueRevision)
+          ? parsed.queueRevision
+          : null
+        const parsedStateRevision = positiveInteger(parsed.stateRevision)
+          ? parsed.stateRevision
+          : null
+        const isSplit =
+          parsed.storageVersion === SPLIT_STORAGE_VERSION && parsed.storage === 'split'
+        const usesVersionedRecords =
+          isSplit && parsedQueueRevision !== null && parsedStateRevision !== null
         let snapshot: PlayerQueueSnapshot | null
-        if (
-          parsed.storageVersion === SPLIT_STORAGE_VERSION &&
-          parsed.storage === 'split' &&
-          parsedRevision !== null &&
-          parsedRevision > 0
-        ) {
+        if (usesVersionedRecords) {
+          queueRevision = parsedQueueRevision
+          stateRevision = parsedStateRevision
+          obsoleteQueueRevision = positiveInteger(parsed.previousQueueRevision)
+            ? parsed.previousQueueRevision
+            : 0
+          obsoleteStateRevision = positiveInteger(parsed.previousStateRevision)
+            ? parsed.previousStateRevision
+            : 0
+          const queueRecord = JSON.parse(
+            storage.getItem(versionedKey(queueKey, parsedQueueRevision)) ?? 'null',
+          ) as QueueStructureRecord
+          const stateRecord = JSON.parse(
+            storage.getItem(versionedKey(stateKey, parsedStateRevision)) ?? 'null',
+          ) as PlaybackStateRecord
+          if (
+            queueRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
+            stateRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
+            queueRecord.revision !== parsedQueueRevision ||
+            stateRecord.revision !== parsedStateRevision
+          ) {
+            snapshot = null
+          } else {
+            snapshot = parsePlayerQueueSnapshot({
+              version: PLAYER_QUEUE_SNAPSHOT_VERSION,
+              queue: queueRecord.queue,
+              playNextQueue: queueRecord.playNextQueue,
+              currentTrack: stateRecord.currentTrack,
+              currentIndex: stateRecord.currentIndex,
+              currentIsPlayNext: stateRecord.currentIsPlayNext,
+              queueSource: queueRecord.queueSource,
+              playbackOrder: queueRecord.playbackOrder,
+              repeatMode: stateRecord.repeatMode,
+              shuffle: stateRecord.shuffle,
+              reversed: stateRecord.reversed,
+              volume: stateRecord.volume,
+              progress: stateRecord.progress,
+            })
+          }
+        } else if (isSplit && parsedRevision !== null) {
           const queueRecord = JSON.parse(
             storage.getItem(queueKey) ?? 'null',
           ) as QueueStructureRecord
@@ -273,6 +348,41 @@ export function createLocalPlayerQueuePersistence(
         }
         if (snapshot === null) {
           clearStoredRecords()
+        } else if (usesVersionedRecords) {
+          // Rehydrate the in-memory bookkeeping as well as the public snapshot.
+          // Without this, the first playback-only update after app restart is
+          // treated as a structural change and serializes the entire queue again.
+          queueRevision = parsedQueueRevision
+          stateRevision = parsedStateRevision
+          obsoleteQueueRevision = positiveInteger(parsed.previousQueueRevision)
+            ? parsed.previousQueueRevision
+            : 0
+          obsoleteStateRevision = positiveInteger(parsed.previousStateRevision)
+            ? parsed.previousStateRevision
+            : 0
+          lastStructure = {
+            queue: snapshot.queue,
+            playNextQueue: snapshot.playNextQueue,
+            playbackOrder: snapshot.playbackOrder,
+            queueSource: snapshot.queueSource,
+          }
+          removeObsoleteRecords()
+        } else if (isSplit && parsedRevision !== null) {
+          // Legacy fixed-key split records are intentionally rewritten on the
+          // next save, but must not inherit bookkeeping from a previous record.
+          queueRevision = 0
+          stateRevision = 0
+          obsoleteQueueRevision = 0
+          obsoleteStateRevision = 0
+          lastStructure = undefined
+        } else {
+          // Legacy combined records are intentionally rewritten on the next
+          // save, but must not inherit bookkeeping from a split record.
+          queueRevision = 0
+          stateRevision = 0
+          obsoleteQueueRevision = 0
+          obsoleteStateRevision = 0
+          lastStructure = undefined
         }
         return snapshot
       } catch {
@@ -281,41 +391,51 @@ export function createLocalPlayerQueuePersistence(
       }
     },
     save(snapshot) {
+      const structureChanged =
+        lastStructure === undefined ||
+        lastStructure.queue !== snapshot.queue ||
+        lastStructure.playNextQueue !== snapshot.playNextQueue ||
+        lastStructure.playbackOrder !== snapshot.playbackOrder ||
+        lastStructure.queueSource !== snapshot.queueSource
+      const nextQueueRevision = structureChanged
+        ? Math.max(1, queueRevision + 1)
+        : Math.max(1, queueRevision)
+      const nextStateRevision = Math.max(1, stateRevision + 1)
+      const staleQueueRevision = structureChanged ? queueRevision : 0
+      const staleStateRevision = stateRevision
+      const storageKeys = new Set([
+        key,
+        queueKey,
+        stateKey,
+        versionedKey(queueKey, nextQueueRevision),
+        versionedKey(stateKey, nextStateRevision),
+      ])
+      if (queueRevision > 0) storageKeys.add(versionedKey(queueKey, queueRevision))
+      if (stateRevision > 0) storageKeys.add(versionedKey(stateKey, stateRevision))
       const previousValues = new Map(
-        [key, queueKey, stateKey].map((storageKey) => [storageKey, storage.getItem(storageKey)]),
+        [...storageKeys].map((storageKey) => [storageKey, storage.getItem(storageKey)]),
       )
-      const previousRevision = revision
-      const previousMarkerRevision = markerRevision
+      const previousQueueRevision = queueRevision
+      const previousStateRevision = stateRevision
+      const previousObsoleteQueueRevision = obsoleteQueueRevision
+      const previousObsoleteStateRevision = obsoleteStateRevision
       const previousStructure = lastStructure
       try {
-        const structureChanged =
-          lastStructure === undefined ||
-          lastStructure.queue !== snapshot.queue ||
-          lastStructure.playNextQueue !== snapshot.playNextQueue ||
-          lastStructure.playbackOrder !== snapshot.playbackOrder ||
-          lastStructure.queueSource !== snapshot.queueSource
         if (structureChanged) {
-          revision = Math.max(1, revision + 1)
           const queueRecord: QueueStructureRecord = {
             storageVersion: SPLIT_STORAGE_VERSION,
-            revision,
+            revision: nextQueueRevision,
             queue: snapshot.queue,
             playNextQueue: snapshot.playNextQueue,
             playbackOrder: snapshot.playbackOrder,
             queueSource: snapshot.queueSource,
           }
-          storage.setItem(queueKey, JSON.stringify(queueRecord))
-          lastStructure = {
-            queue: snapshot.queue,
-            playNextQueue: snapshot.playNextQueue,
-            playbackOrder: snapshot.playbackOrder,
-            queueSource: snapshot.queueSource,
-          }
+          storage.setItem(versionedKey(queueKey, nextQueueRevision), JSON.stringify(queueRecord))
         }
 
         const stateRecord: PlaybackStateRecord = {
           storageVersion: SPLIT_STORAGE_VERSION,
-          revision,
+          revision: nextStateRevision,
           currentTrack: snapshot.currentTrack,
           currentIndex: snapshot.currentIndex,
           currentIsPlayNext: snapshot.currentIsPlayNext,
@@ -325,21 +445,34 @@ export function createLocalPlayerQueuePersistence(
           volume: snapshot.volume,
           progress: snapshot.progress,
         }
-        storage.setItem(stateKey, JSON.stringify(stateRecord))
-        if (markerRevision !== revision) {
-          storage.setItem(
-            key,
-            JSON.stringify({
-              storageVersion: SPLIT_STORAGE_VERSION,
-              storage: 'split',
-              revision,
-            }),
-          )
-          markerRevision = revision
+        storage.setItem(versionedKey(stateKey, nextStateRevision), JSON.stringify(stateRecord))
+        storage.setItem(
+          key,
+          JSON.stringify({
+            storageVersion: SPLIT_STORAGE_VERSION,
+            storage: 'split',
+            queueRevision: nextQueueRevision,
+            stateRevision: nextStateRevision,
+            previousQueueRevision: staleQueueRevision > 0 ? staleQueueRevision : null,
+            previousStateRevision: staleStateRevision > 0 ? staleStateRevision : null,
+          }),
+        )
+        queueRevision = nextQueueRevision
+        stateRevision = nextStateRevision
+        obsoleteQueueRevision = staleQueueRevision
+        obsoleteStateRevision = staleStateRevision
+        lastStructure = {
+          queue: snapshot.queue,
+          playNextQueue: snapshot.playNextQueue,
+          playbackOrder: snapshot.playbackOrder,
+          queueSource: snapshot.queueSource,
         }
+        removeObsoleteRecords()
       } catch (error) {
-        revision = previousRevision
-        markerRevision = previousMarkerRevision
+        queueRevision = previousQueueRevision
+        stateRevision = previousStateRevision
+        obsoleteQueueRevision = previousObsoleteQueueRevision
+        obsoleteStateRevision = previousObsoleteStateRevision
         lastStructure = previousStructure
         for (const [storageKey, value] of previousValues) {
           try {
@@ -353,7 +486,7 @@ export function createLocalPlayerQueuePersistence(
       }
     },
     clear() {
-      clearStoredRecords()
+      clearStoredRecords(true)
     },
   }
 }

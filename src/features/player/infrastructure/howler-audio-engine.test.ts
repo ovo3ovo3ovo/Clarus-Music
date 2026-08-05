@@ -86,6 +86,27 @@ describe('Howler source format selection', () => {
     ).toBe(expected)
   })
 
+  it('releases a managed source when load is already aborted', async () => {
+    const release = vi.fn()
+    const controller = new AbortController()
+    controller.abort('superseded')
+    const engine = new HowlerAudioEngine()
+
+    await expect(
+      engine.load(
+        {
+          kind: 'managed-url',
+          url: 'asset://localhost/cache/song.mp3',
+          mimeType: 'audio/mpeg',
+          release,
+        },
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(release).toHaveBeenCalledOnce()
+    engine.dispose()
+  })
+
   it.each([
     ['audio/flac', 'flac'],
     ['audio/mp4', 'm4a'],

@@ -372,6 +372,7 @@ import { parsePositiveIntegerRouteParam } from '@/app/route-params'
 import { useAuthStore } from '@/features/auth/application/auth-store'
 import { NativeCatalogGateway } from '@/features/catalog/infrastructure/native-catalog'
 import { onTrackLikeChange } from '@/features/player/application/track-like-events'
+import { releaseAudioSource } from '@/features/player/domain/audio-engine'
 import { usePlayerStore } from '@/features/player/application/player-store'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import VirtualTrackList from '@/features/search/presentation/VirtualTrackList.vue'
@@ -702,7 +703,10 @@ async function playTrack(track: Track): Promise<void> {
       settingsStore.settings.musicQuality,
       controller.signal,
     )
-    if (playbackController !== controller) return
+    if (playbackController !== controller) {
+      releaseAudioSource(source)
+      return
+    }
     player.setQueue(selection.queue, selection.index, sourceKey.value)
     await player.load(selection.track, source, true, controller.signal)
     void hydrateRemaining()
