@@ -61,11 +61,21 @@ function assertSafePid(value, label) {
   }
 }
 
+function assertSnapshotPid(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    fail('MALFORMED', `${label} must be a positive decimal safe integer`)
+  }
+}
+
 function assertPath(value, label) {
   if (typeof value !== 'string' || value.length === 0 || hasControlCharacters(value)) {
     fail('MALFORMED', `${label} must be a non-empty path without control characters`)
   }
-  if (!isAbsolute(value) || value.includes('\\') || value.split('/').some((part) => part === '..')) {
+  if (
+    !isAbsolute(value) ||
+    value.includes('\\') ||
+    value.split('/').some((part) => part === '..')
+  ) {
     fail('MALFORMED', `${label} must be an absolute path without traversal`)
   }
 }
@@ -89,7 +99,7 @@ function normaliseCoalition(value, label) {
 
 function normaliseProcess(record, label = 'process') {
   assertPlainObject(record, label)
-  assertSafePid(record.pid, `${label}.pid`)
+  assertSnapshotPid(record.pid, `${label}.pid`)
   if (!Number.isSafeInteger(record.ppid) || record.ppid < 0) {
     fail('MALFORMED', `${label}.ppid must be a nonnegative safe integer`)
   }
@@ -145,7 +155,8 @@ function normaliseApplications(applications) {
 }
 
 function normaliseInfoByPid(infoByPid) {
-  const entries = infoByPid instanceof Map ? [...infoByPid.entries()] : Object.entries(infoByPid ?? {})
+  const entries =
+    infoByPid instanceof Map ? [...infoByPid.entries()] : Object.entries(infoByPid ?? {})
   const normalized = new Map()
   for (const [key, value] of entries) {
     const numericKey = typeof key === 'number' ? key : Number(key)
@@ -189,14 +200,22 @@ export function assertExpectedReleaseBundle(bundle) {
     !bundle.executablePath.startsWith(expectedExecutablePrefix) ||
     !bundle.executableRealpath.startsWith(expectedExecutableRealpathPrefix)
   ) {
-    fail('BUNDLE_EXECUTABLE', 'bundle executable must real-resolve exactly under the release bundle')
+    fail(
+      'BUNDLE_EXECUTABLE',
+      'bundle executable must real-resolve exactly under the release bundle',
+    )
   }
   const executableName = bundle.executablePath.slice(expectedExecutablePrefix.length)
   if (!/^[A-Za-z0-9._-]+$/.test(executableName)) {
     fail('BUNDLE_EXECUTABLE', 'bundle executable must be a simple executable filename')
   }
-  if (resolve(bundle.executableRealpath) !== `${expectedExecutableRealpathPrefix}${executableName}`) {
-    fail('BUNDLE_EXECUTABLE', 'bundle executable must real-resolve exactly under the release bundle')
+  if (
+    resolve(bundle.executableRealpath) !== `${expectedExecutableRealpathPrefix}${executableName}`
+  ) {
+    fail(
+      'BUNDLE_EXECUTABLE',
+      'bundle executable must real-resolve exactly under the release bundle',
+    )
   }
   if (bundle.bundleId !== EXPECTED_BUNDLE_ID) {
     fail('BUNDLE_ID', `bundle id must be ${EXPECTED_BUNDLE_ID}`)
@@ -266,19 +285,36 @@ export async function readReleaseBundle({
   }
   const infoPath = join(appBundlePath, 'Contents', 'Info.plist')
   const identifier = parsePlistText(
-    await invoke(runCommand, '/usr/bin/plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', infoPath]),
+    await invoke(runCommand, '/usr/bin/plutil', [
+      '-extract',
+      'CFBundleIdentifier',
+      'raw',
+      '-o',
+      '-',
+      infoPath,
+    ]),
     'CFBundleIdentifier',
   )
   const executableName = parsePlistText(
-    await invoke(runCommand, '/usr/bin/plutil', ['-extract', 'CFBundleExecutable', 'raw', '-o', '-', infoPath]),
+    await invoke(runCommand, '/usr/bin/plutil', [
+      '-extract',
+      'CFBundleExecutable',
+      'raw',
+      '-o',
+      '-',
+      infoPath,
+    ]),
     'CFBundleExecutable',
   )
   const bundleVersion = parsePlistText(
-    await invoke(
-      runCommand,
-      '/usr/bin/plutil',
-      ['-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', infoPath],
-    ),
+    await invoke(runCommand, '/usr/bin/plutil', [
+      '-extract',
+      'CFBundleShortVersionString',
+      'raw',
+      '-o',
+      '-',
+      infoPath,
+    ]),
     'CFBundleShortVersionString',
   )
   if (identifier !== EXPECTED_BUNDLE_ID) {
@@ -347,6 +383,12 @@ export function parsePsSnapshot(output) {
     const ppid = Number(fields[1].trim())
     const start = fields[2].trim()
     const path = fields[3].trim()
+    if (!path.startsWith('/')) {
+      // `comm=` returns a basename for some system daemons. It cannot be
+      // realpath-attributed, so omit it rather than rejecting the full
+      // snapshot; app and WebKit records use absolute executable paths.
+      continue
+    }
     records.push({ pid, ppid, start, path, realpath: path })
   }
   return normaliseSnapshot(records)
@@ -496,8 +538,14 @@ export function attributeProcessTree({
   if (!root) {
     fail('ROOT_PID_MISSING', 'root PID does not exist in the ps snapshot')
   }
-  if (root.realpath !== releaseBundle.executableRealpath || root.path !== releaseBundle.executablePath) {
-    fail('ROOT_EXECUTABLE_MISMATCH', 'root PID executable does not real-resolve exactly to the release executable')
+  if (
+    root.realpath !== releaseBundle.executableRealpath ||
+    root.path !== releaseBundle.executablePath
+  ) {
+    fail(
+      'ROOT_EXECUTABLE_MISMATCH',
+      'root PID executable does not real-resolve exactly to the release executable',
+    )
   }
   const appRecords = normaliseApplications(applications)
   const rootApplications = appRecords.filter(
@@ -508,7 +556,10 @@ export function attributeProcessTree({
       record.bundleId === releaseBundle.bundleId,
   )
   if (rootApplications.length !== 1) {
-    fail('ROOT_LSAPPINFO_MISMATCH', 'lsappinfo list must have exactly one matching root PID and executable record')
+    fail(
+      'ROOT_LSAPPINFO_MISMATCH',
+      'lsappinfo list must have exactly one matching root PID and executable record',
+    )
   }
   const info = normaliseInfoByPid(infoByPid)
   const rootInfo = info.get(rootPid)
@@ -518,7 +569,10 @@ export function attributeProcessTree({
     rootInfo.realpath !== releaseBundle.executableRealpath ||
     rootInfo.bundleId !== releaseBundle.bundleId
   ) {
-    fail('ROOT_LSAPPINFO_MISMATCH', 'lsappinfo info must exactly match the release root executable and bundle id')
+    fail(
+      'ROOT_LSAPPINFO_MISMATCH',
+      'lsappinfo info must exactly match the release root executable and bundle id',
+    )
   }
   const coalition = rootApplications[0].coalition
   if (!deepEqualCoalition(coalition, rootInfo.coalition)) {
@@ -543,7 +597,10 @@ export function attributeProcessTree({
     const roleCandidates = []
     for (const process of governed) {
       if (hasHelperBasename(process, expectedPath) && !exactHelperMatch(process, expectedPath)) {
-        fail('HELPER_PATH_OUTSIDE', `${role} helper has an outside or basename-only executable path`)
+        fail(
+          'HELPER_PATH_OUTSIDE',
+          `${role} helper has an outside or basename-only executable path`,
+        )
       }
       if (exactHelperMatch(process, expectedPath)) {
         roleCandidates.push(process)
@@ -564,7 +621,10 @@ export function attributeProcessTree({
       processInfo.bundleId !== HELPER_BUNDLE_IDS[role] ||
       !deepEqualCoalition(processInfo.coalition, coalition)
     ) {
-      fail('HELPER_LSAPPINFO_MISMATCH', `${role} helper has invalid LaunchServices bundle, path, or coalition evidence`)
+      fail(
+        'HELPER_LSAPPINFO_MISMATCH',
+        `${role} helper has invalid LaunchServices bundle, path, or coalition evidence`,
+      )
     }
     selectedHelpers.push(asSelected(role, process))
   }
@@ -587,7 +647,15 @@ export function attributeProcessTree({
   }
 }
 
-export function revalidateAttribution({ baseline, rootPid, bundle, snapshot, applications, infoByPid, helperPaths } = {}) {
+export function revalidateAttribution({
+  baseline,
+  rootPid,
+  bundle,
+  snapshot,
+  applications,
+  infoByPid,
+  helperPaths,
+} = {}) {
   assertPlainObject(baseline, 'baseline attribution')
   if (!Array.isArray(baseline.selected) || baseline.selected.length !== 4) {
     fail('MALFORMED', 'baseline attribution must include the exact four selected roles')
@@ -656,20 +724,37 @@ export async function captureAttribution({
   captureInfoByPid,
   helperPaths,
 } = {}) {
-  if (typeof captureProcesses !== 'function' || typeof captureApplications !== 'function' || typeof captureInfoByPid !== 'function') {
+  if (
+    typeof captureProcesses !== 'function' ||
+    typeof captureApplications !== 'function' ||
+    typeof captureInfoByPid !== 'function'
+  ) {
     fail('MALFORMED', 'attribution capture requires process and LaunchServices capture functions')
   }
   const snapshot = await captureProcesses()
   const applications = await captureApplications()
-  const infoByPid = await captureInfoByPid(normaliseSnapshot(snapshot).map((process) => process.pid))
+  const infoByPid = await captureInfoByPid(
+    normaliseSnapshot(snapshot).map((process) => process.pid),
+  )
   return attributeProcessTree({ rootPid, bundle, snapshot, applications, infoByPid, helperPaths })
 }
 
-export async function captureMacosAttribution({ rootPid, bundle, runCommand, resolveRealpath = realpath, helperPaths } = {}) {
+export async function captureMacosAttribution({
+  rootPid,
+  bundle,
+  runCommand,
+  resolveRealpath = realpath,
+  helperPaths,
+} = {}) {
   const ps = await invoke(runCommand, '/bin/ps', ['-ww', '-axo', 'pid=,ppid=,lstart=,comm='])
   const rawSnapshot = parsePsSnapshot(String(ps?.stdout ?? ''))
   const snapshot = []
-  for (const record of rawSnapshot) {
+  // macOS `comm=` reports only a basename for some system daemons. Those
+  // records cannot participate in strict path/realpath attribution, but they
+  // must not make an otherwise valid app snapshot malformed. Keep only
+  // absolute-path records; selected app/WebKit roles still fail closed if
+  // their own paths are unavailable.
+  for (const record of rawSnapshot.filter(({ path }) => path.startsWith('/'))) {
     let resolved
     try {
       resolved = await resolveRealpath(record.path)
@@ -682,7 +767,11 @@ export async function captureMacosAttribution({ rootPid, bundle, runCommand, res
   const applications = parseLsappinfoApplications(String(listed?.stdout ?? ''))
   const infoByPid = new Map()
   for (const process of snapshot) {
-    const inspected = await invoke(runCommand, '/usr/bin/lsappinfo', ['info', '-pid', String(process.pid)])
+    const inspected = await invoke(runCommand, '/usr/bin/lsappinfo', [
+      'info',
+      '-pid',
+      String(process.pid),
+    ])
     infoByPid.set(process.pid, parseLsappinfoInfo(String(inspected?.stdout ?? '')))
   }
   return attributeProcessTree({ rootPid, bundle, snapshot, applications, infoByPid, helperPaths })

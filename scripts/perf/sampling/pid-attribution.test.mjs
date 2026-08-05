@@ -18,13 +18,7 @@ const BUNDLE =
 const EXECUTABLE = `${BUNDLE}/Contents/MacOS/simplemusic`
 const COALITION = { id: '17', asn: '0x40000017' }
 
-function processRecord({
-  pid,
-  ppid = 1,
-  start = `start-${pid}`,
-  path,
-  realpath = path,
-}) {
+function processRecord({ pid, ppid = 1, start = `start-${pid}`, path, realpath = path }) {
   return { pid, ppid, start, path, realpath }
 }
 
@@ -37,7 +31,10 @@ function fixture({ withOtherInstance = true } = {}) {
   const web = processRecord({ pid: 4102, path: DEFAULT_HELPER_PATHS['web-content'] })
   const gpu = processRecord({ pid: 4103, path: DEFAULT_HELPER_PATHS.gpu })
   const networking = processRecord({ pid: 4104, path: DEFAULT_HELPER_PATHS.networking })
-  const unknown = processRecord({ pid: 4105, path: '/System/Library/Frameworks/Other.framework/helper' })
+  const unknown = processRecord({
+    pid: 4105,
+    path: '/System/Library/Frameworks/Other.framework/helper',
+  })
   const other = processRecord({
     pid: 5101,
     path: '/Applications/Clarus Music.app/Contents/MacOS/simplemusic',
@@ -75,7 +72,10 @@ function fixture({ withOtherInstance = true } = {}) {
         bundleId: 'com.apple.WebKit.Networking',
       }),
     ],
-    [unknown.pid, infoRecord({ pid: unknown.pid, path: unknown.path, bundleId: 'com.apple.Other' })],
+    [
+      unknown.pid,
+      infoRecord({ pid: unknown.pid, path: unknown.path, bundleId: 'com.apple.Other' }),
+    ],
     ...(withOtherInstance
       ? [
           [
@@ -124,7 +124,10 @@ test('attributes the exact path-spaced release root rather than another same-nam
       ['networking', 4104, DEFAULT_HELPER_PATHS.networking],
     ],
   )
-  assert.deepEqual(result.unselected.map((entry) => entry.pid), [4105])
+  assert.deepEqual(
+    result.unselected.map((entry) => entry.pid),
+    [4105],
+  )
 })
 
 test('uses posix-descendant only when every WebKit helper is in the exact root tree', () => {
@@ -162,7 +165,8 @@ test('rejects old installed bundles and non-release bundle descriptors before at
 
 test('readReleaseBundle accepts a real release bundle through a /tmp prefix alias but rejects an outside bundle', async () => {
   const aliasBundle = '/tmp/clarus-worktree/src-tauri/target/release/bundle/macos/Clarus Music.app'
-  const expectedBundle = '/private/tmp/clarus-worktree/src-tauri/target/release/bundle/macos/Clarus Music.app'
+  const expectedBundle =
+    '/private/tmp/clarus-worktree/src-tauri/target/release/bundle/macos/Clarus Music.app'
   const aliasExecutable = `${aliasBundle}/Contents/MacOS/simplemusic`
   const expectedExecutable = `${expectedBundle}/Contents/MacOS/simplemusic`
   const directory = { isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false }
@@ -236,13 +240,14 @@ test('rejects missing, duplicate, outside, basename-only, and malformed helper e
       bundleId: 'com.apple.WebKit.WebContent',
     }),
   )
-  assert.throws(() => attributeProcessTree({ rootPid: 4101, ...duplicate }), /duplicate.*web-content/i)
+  assert.throws(
+    () => attributeProcessTree({ rootPid: 4101, ...duplicate }),
+    /duplicate.*web-content/i,
+  )
 
   const outside = fixture()
-  outside.snapshot.find((entry) => entry.pid === 4102).path =
-    '/tmp/com.apple.WebKit.WebContent'
-  outside.snapshot.find((entry) => entry.pid === 4102).realpath =
-    '/tmp/com.apple.WebKit.WebContent'
+  outside.snapshot.find((entry) => entry.pid === 4102).path = '/tmp/com.apple.WebKit.WebContent'
+  outside.snapshot.find((entry) => entry.pid === 4102).realpath = '/tmp/com.apple.WebKit.WebContent'
   outside.infoByPid.set(
     4102,
     infoRecord({
@@ -268,10 +273,7 @@ test('revalidation detects PID reuse, executable changes, and coalition drift', 
 
   const pidReuse = fixture()
   pidReuse.snapshot.find((entry) => entry.pid === 4102).start = 'reused'
-  assert.throws(
-    () => revalidateAttribution({ baseline, rootPid: 4101, ...pidReuse }),
-    /PID_REUSE/i,
-  )
+  assert.throws(() => revalidateAttribution({ baseline, rootPid: 4101, ...pidReuse }), /PID_REUSE/i)
 
   const executable = fixture()
   executable.snapshot.find((entry) => entry.pid === 4103).realpath = '/tmp/other-gpu'
@@ -311,4 +313,15 @@ executable path="/Applications/Clarus Music.app/Contents/MacOS/simplemusic"
   assert.equal(records.length, 2)
   assert.deepEqual(records[0].coalition, { id: 'asn:0x40000017', asn: '0x40000017' })
   assert.equal(records[1].path, '/Applications/Clarus Music.app/Contents/MacOS/simplemusic')
+})
+
+test('accepts launchd PID 1 in a process snapshot while keeping attribution roots above one', () => {
+  const records = parsePsSnapshot(`1\t0\tlaunchd\t/sbin/launchd\n4101\t1\tapp\t${EXECUTABLE}`)
+  assert.deepEqual(
+    records.map(({ pid, ppid }) => ({ pid, ppid })),
+    [
+      { pid: 1, ppid: 0 },
+      { pid: 4101, ppid: 1 },
+    ],
+  )
 })
