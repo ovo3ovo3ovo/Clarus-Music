@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process'
 import { Buffer } from 'node:buffer'
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
-import { link, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs'
+import { link, lstat, mkdir, rename, unlink } from 'node:fs/promises'
 import { totalmem, cpus } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
@@ -705,24 +705,21 @@ function sameFixtureStatIdentity(left, right) {
   )
 }
 
-async function retainFixtureIntegrityGuard(verified) {
-  const paths = [
-    { label: 'fixture lock', pathname: join(verified.directory, 'fixtures.lock.json') },
-    ...normalizeFixtureRoles(verified.lock).map((fixture) => ({
-      label: `fixture file ${fixture.filename}`,
-      pathname: join(verified.directory, fixture.filename),
-    })),
-  ]
+// Synchronous witnesses are required for the initial verifier: no async
+// lstat/open gap may exist in which a fixture can change and be restored before
+// its first identity is retained. ctime/mtime on the descriptor records the
+// intervening write even when the pathname bytes are restored.
+function retainFixtureIntegrityGuardSyncFromPaths(paths) {
   const witnesses = []
   try {
     for (const { label, pathname } of paths) {
-      const before = await lstat(pathname, { bigint: true })
+      const before = lstatSync(pathname, { bigint: true })
       if (before.isSymbolicLink() || !before.isFile()) {
         samplingError('FIXTURE_DRIFT', 'fixture', `${label} is no longer a regular no-follow file`)
       }
-      const handle = await open(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+      const fd = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
       try {
-        const opened = await handle.stat({ bigint: true })
+        const opened = fstatSync(fd, { bigint: true })
         if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
           samplingError(
             'FIXTURE_DRIFT',
@@ -730,19 +727,20 @@ async function retainFixtureIntegrityGuard(verified) {
             `${label} changed while its integrity witness opened`,
           )
         }
-        witnesses.push({
-          baseline: fixtureStatIdentity(opened),
-          handle,
-          label,
-          pathname,
-        })
+        witnesses.push({ baseline: fixtureStatIdentity(opened), fd, label, pathname })
       } catch (error) {
-        await handle.close().catch(() => {})
+        closeSync(fd)
         throw error
       }
     }
   } catch (error) {
-    await Promise.all(witnesses.map(({ handle }) => handle.close().catch(() => {})))
+    for (const witness of witnesses) {
+      try {
+        closeSync(witness.fd)
+      } catch {
+        // Best effort cleanup; the original fixture failure is authoritative.
+      }
+    }
     if (error instanceof SamplingError) {
       throw error
     }
@@ -761,8 +759,8 @@ async function retainFixtureIntegrityGuard(verified) {
         let opened
         let current
         try {
-          opened = await witness.handle.stat({ bigint: true })
-          current = await lstat(witness.pathname, { bigint: true })
+          opened = fstatSync(witness.fd, { bigint: true })
+          current = lstatSync(witness.pathname, { bigint: true })
         } catch (error) {
           samplingError(
             'FIXTURE_DRIFT',
@@ -788,9 +786,77 @@ async function retainFixtureIntegrityGuard(verified) {
     async close() {
       if (!closed) {
         closed = true
-        await Promise.all(witnesses.map(({ handle }) => handle.close().catch(() => {})))
+        for (const witness of witnesses) {
+          try {
+            closeSync(witness.fd)
+          } catch {
+            // The descriptor may already have been closed during failure cleanup.
+          }
+        }
       }
     },
+  }
+}
+
+function retainFixtureIntegrityGuardSync(verified) {
+  return retainFixtureIntegrityGuardSyncFromPaths([
+    { label: 'fixture lock', pathname: join(verified.directory, 'fixtures.lock.json') },
+    ...normalizeFixtureRoles(verified.lock).map((fixture) => ({
+      label: `fixture file ${fixture.filename}`,
+      pathname: join(verified.directory, fixture.filename),
+    })),
+  ])
+}
+
+// Read and witness the lock plus every filename it names before the first
+// asynchronous fixture verifier starts. If the lock is unavailable or
+// malformed, return null and let the verifier produce the authoritative input
+// error; valid fixtures always get a pre-verifier witness set.
+function retainInitialFixtureIntegrityGuard(directory) {
+  const resolvedDirectory = resolve(directory)
+  const lockPath = join(resolvedDirectory, 'fixtures.lock.json')
+  let lockFd
+  try {
+    lockFd = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const lockContents = readFileSync(lockFd)
+    const parsed = JSON.parse(lockContents.toString('utf8'))
+    if (!Array.isArray(parsed?.files) || parsed.files.length === 0) {
+      closeSync(lockFd)
+      return null
+    }
+    const names = parsed.files.map((file) => file?.filename)
+    if (
+      names.some(
+        (filename) =>
+          typeof filename !== 'string' || !/^[a-z0-9][a-z0-9.-]*\.(mp3|flac|yrc)$/.test(filename),
+      )
+    ) {
+      closeSync(lockFd)
+      return null
+    }
+    const guard = retainFixtureIntegrityGuardSyncFromPaths([
+      { label: 'fixture lock', pathname: lockPath },
+      ...names.map((filename) => ({
+        label: `fixture file ${filename}`,
+        pathname: join(resolvedDirectory, filename),
+      })),
+    ])
+    // The helper opens its own descriptor for the lock; close the preliminary
+    // reader now so it does not leak alongside the retained witness.
+    closeSync(lockFd)
+    return guard
+  } catch (error) {
+    if (lockFd !== undefined) {
+      try {
+        closeSync(lockFd)
+      } catch {
+        // Best effort cleanup before verifier-owned validation runs.
+      }
+    }
+    if (error instanceof SamplingError) {
+      throw error
+    }
+    return null
   }
 }
 
@@ -1207,6 +1273,9 @@ export async function runExternalSampler(options, dependencies = {}) {
       await renameArtifact(stagingPath, preparedPath)
       staged = false
       prepared = true
+      if (requireNoSignal && signalState.signal) {
+        return false
+      }
       if (expectedOwnership === 'owned') {
         return false
       }
@@ -1642,10 +1711,14 @@ export async function runExternalSampler(options, dependencies = {}) {
     }
 
     const verifier = dependencies.fixtureVerifier ?? verifyFixtureSet
+    const initialFixtureIntegrityGuard = retainInitialFixtureIntegrityGuard(
+      options.fixtureDirectory,
+    )
     const verified = await verifyFixtures(verifier, options.fixtureDirectory)
     assertNotInterrupted()
     fixtureVerifierClose = verified.close
-    fixtureIntegrityGuard = await retainFixtureIntegrityGuard(verified)
+    fixtureIntegrityGuard =
+      initialFixtureIntegrityGuard ?? retainFixtureIntegrityGuardSync(verified)
     assertNotInterrupted()
     fixtureBaselineVerified = true
     const lockPath = join(verified.directory, 'fixtures.lock.json')

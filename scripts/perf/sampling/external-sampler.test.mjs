@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
+import { writeFileSync } from 'node:fs'
 import {
   link,
   mkdtemp,
@@ -759,6 +760,40 @@ test('fixture bytes changed and restored before the first witness make the run u
   assert.equal(result.report.usable, false)
 })
 
+test('fixture bytes changed and restored during initial verification make the run unusable', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  const fixturePath = join(
+    harness.repositoryRoot,
+    'artifacts',
+    'perf',
+    'fixtures',
+    'current',
+    'tone-short-mp3.mp3',
+  )
+  const originalBytes = await readFile(fixturePath)
+  const originalVerifier = harness.dependencies.fixtureVerifier
+  let injected = false
+  harness.dependencies.fixtureVerifier = async (argumentsValue) => {
+    const result = await originalVerifier(argumentsValue)
+    if (!injected) {
+      injected = true
+      globalThis.queueMicrotask(() => {
+        writeFileSync(fixturePath, Buffer.from('x'))
+        writeFileSync(fixturePath, originalBytes)
+      })
+    }
+    return result
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(injected, true)
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.report.failure.code, 'FIXTURE_DRIFT')
+  assert.equal(result.report.usable, false)
+})
+
 test('post-baseline fixture verifier SamplingError is normalized to FIXTURE_DRIFT', async (t) => {
   const harness = await createHarness()
   t.after(() => rm(harness.temporary, { recursive: true, force: true }))
@@ -1381,7 +1416,7 @@ test('a publish seam that throws after creating run.json is reconciled as comple
   assert.equal(emitted.usable, true)
 })
 
-test('a SIGTERM after the first report rename cannot return interruption while a completed report remains', async (t) => {
+test('a SIGTERM after the first report rename cannot publish a completed report', async (t) => {
   const harness = await createHarness()
   t.after(() => rm(harness.temporary, { recursive: true, force: true }))
   let completedRename = false
@@ -1413,15 +1448,12 @@ test('a SIGTERM after the first report rename cannot return interruption while a
   const result = await runExternalSampler(harness.options, harness.dependencies)
 
   assert.equal(completedRename, true)
-  assert.equal(result.exitCode, 0)
-  assert.equal(result.report.status, 'completed')
-  assert.equal(result.report.usable, true)
-  const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
-  assert.equal(emitted.status, 'completed')
-  assert.equal(emitted.usable, true)
+  assert.equal(result.exitCode, 143)
+  assert.equal(result.report.status, 'interrupted')
+  assert.equal(result.report.usable, false)
+  await assert.rejects(readFile(join(harness.output, 'run.json')), { code: 'ENOENT' })
   assert.equal(failureStageAttempted, true)
   assert.equal(cleanupAttempted, true)
-  assert.equal(result.cleanupError?.code, 'EACCES')
 })
 
 test('an existing unowned run.json is never overwritten by completed or failure reporting', async (t) => {
