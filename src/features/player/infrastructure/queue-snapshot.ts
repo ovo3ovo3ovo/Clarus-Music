@@ -28,6 +28,32 @@ export interface PlayerQueuePersistence {
   clear(): void
 }
 
+const SPLIT_STORAGE_VERSION = 1
+const SPLIT_QUEUE_SUFFIX = '.queue'
+const SPLIT_STATE_SUFFIX = '.state'
+
+interface QueueStructureRecord {
+  readonly storageVersion: 1
+  readonly revision: number
+  readonly queue: readonly Track[]
+  readonly playNextQueue: readonly Track[]
+  readonly playbackOrder: readonly number[]
+  readonly queueSource: string | null
+}
+
+interface PlaybackStateRecord {
+  readonly storageVersion: 1
+  readonly revision: number
+  readonly currentTrack: Track | null
+  readonly currentIndex: number
+  readonly currentIsPlayNext: boolean
+  readonly repeatMode: RepeatMode
+  readonly shuffle: boolean
+  readonly reversed: boolean
+  readonly volume: number
+  readonly progress: number
+}
+
 type UnknownRecord = Record<string, unknown>
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -171,34 +197,159 @@ export function createLocalPlayerQueuePersistence(
   storage: Pick<globalThis.Storage, 'getItem' | 'setItem' | 'removeItem'>,
   key = 'clarus-music.player.queue.v1',
 ): PlayerQueuePersistence {
+  const queueKey = `${key}${SPLIT_QUEUE_SUFFIX}`
+  const stateKey = `${key}${SPLIT_STATE_SUFFIX}`
+  let revision = 0
+  let markerRevision: number | null = null
+  let lastStructure:
+    | {
+        readonly queue: readonly Track[]
+        readonly playNextQueue: readonly Track[]
+        readonly playbackOrder: readonly number[]
+        readonly queueSource: string | null
+      }
+    | undefined
+
+  const clearStoredRecords = (): void => {
+    for (const storageKey of [key, queueKey, stateKey]) {
+      try {
+        storage.removeItem(storageKey)
+      } catch {
+        // Storage can be disabled by WebView policy.
+      }
+    }
+    revision = 0
+    markerRevision = null
+    lastStructure = undefined
+  }
+
   return {
     load() {
       try {
         const raw = storage.getItem(key)
         if (raw === null) return null
-        const snapshot = parsePlayerQueueSnapshot(JSON.parse(raw))
-        if (snapshot === null) {
-          try {
-            storage.removeItem(key)
-          } catch {
-            // A denied cleanup must not prevent the player from starting.
+        const parsed = JSON.parse(raw) as UnknownRecord
+        let snapshot: PlayerQueueSnapshot | null
+        if (
+          parsed.storageVersion === SPLIT_STORAGE_VERSION &&
+          parsed.storage === 'split' &&
+          Number.isSafeInteger(parsed.revision) &&
+          parsed.revision > 0
+        ) {
+          const queueRecord = JSON.parse(
+            storage.getItem(queueKey) ?? 'null',
+          ) as QueueStructureRecord
+          const stateRecord = JSON.parse(storage.getItem(stateKey) ?? 'null') as PlaybackStateRecord
+          if (
+            queueRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
+            stateRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
+            queueRecord.revision !== parsed.revision ||
+            stateRecord.revision !== parsed.revision
+          ) {
+            snapshot = null
+          } else {
+            snapshot = parsePlayerQueueSnapshot({
+              version: PLAYER_QUEUE_SNAPSHOT_VERSION,
+              queue: queueRecord.queue,
+              playNextQueue: queueRecord.playNextQueue,
+              currentTrack: stateRecord.currentTrack,
+              currentIndex: stateRecord.currentIndex,
+              currentIsPlayNext: stateRecord.currentIsPlayNext,
+              queueSource: queueRecord.queueSource,
+              playbackOrder: queueRecord.playbackOrder,
+              repeatMode: stateRecord.repeatMode,
+              shuffle: stateRecord.shuffle,
+              reversed: stateRecord.reversed,
+              volume: stateRecord.volume,
+              progress: stateRecord.progress,
+            })
           }
+        } else {
+          snapshot = parsePlayerQueueSnapshot(parsed)
+        }
+        if (snapshot === null) {
+          clearStoredRecords()
         }
         return snapshot
       } catch {
-        try {
-          storage.removeItem(key)
-        } catch {
-          // Storage can be disabled by WebView policy.
-        }
+        clearStoredRecords()
         return null
       }
     },
     save(snapshot) {
-      storage.setItem(key, JSON.stringify(snapshot))
+      const previousValues = new Map(
+        [key, queueKey, stateKey].map((storageKey) => [storageKey, storage.getItem(storageKey)]),
+      )
+      const previousRevision = revision
+      const previousMarkerRevision = markerRevision
+      const previousStructure = lastStructure
+      try {
+        const structureChanged =
+          lastStructure === undefined ||
+          lastStructure.queue !== snapshot.queue ||
+          lastStructure.playNextQueue !== snapshot.playNextQueue ||
+          lastStructure.playbackOrder !== snapshot.playbackOrder ||
+          lastStructure.queueSource !== snapshot.queueSource
+        if (structureChanged) {
+          revision = Math.max(1, revision + 1)
+          const queueRecord: QueueStructureRecord = {
+            storageVersion: SPLIT_STORAGE_VERSION,
+            revision,
+            queue: snapshot.queue,
+            playNextQueue: snapshot.playNextQueue,
+            playbackOrder: snapshot.playbackOrder,
+            queueSource: snapshot.queueSource,
+          }
+          storage.setItem(queueKey, JSON.stringify(queueRecord))
+          lastStructure = {
+            queue: snapshot.queue,
+            playNextQueue: snapshot.playNextQueue,
+            playbackOrder: snapshot.playbackOrder,
+            queueSource: snapshot.queueSource,
+          }
+        }
+
+        const stateRecord: PlaybackStateRecord = {
+          storageVersion: SPLIT_STORAGE_VERSION,
+          revision,
+          currentTrack: snapshot.currentTrack,
+          currentIndex: snapshot.currentIndex,
+          currentIsPlayNext: snapshot.currentIsPlayNext,
+          repeatMode: snapshot.repeatMode,
+          shuffle: snapshot.shuffle,
+          reversed: snapshot.reversed,
+          volume: snapshot.volume,
+          progress: snapshot.progress,
+        }
+        storage.setItem(stateKey, JSON.stringify(stateRecord))
+        if (markerRevision !== revision) {
+          storage.setItem(
+            key,
+            JSON.stringify({
+              storageVersion: SPLIT_STORAGE_VERSION,
+              storage: 'split',
+              revision,
+            }),
+          )
+          markerRevision = revision
+        }
+      } catch (error) {
+        revision = previousRevision
+        markerRevision = previousMarkerRevision
+        lastStructure = previousStructure
+        for (const [storageKey, value] of previousValues) {
+          try {
+            if (value === null) storage.removeItem(storageKey)
+            else storage.setItem(storageKey, value)
+          } catch {
+            // Preserve the original storage error; recovery is best effort.
+          }
+        }
+        throw error
+      }
     },
     clear() {
-      storage.removeItem(key)
+      clearStoredRecords()
     },
   }
 }

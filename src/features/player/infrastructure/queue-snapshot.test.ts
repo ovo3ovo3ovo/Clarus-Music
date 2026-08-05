@@ -77,4 +77,41 @@ describe('player queue snapshots', () => {
     persistence.clear()
     expect(values.has('queue')).toBe(false)
   })
+
+  it('does not rewrite the queue blob when only playback metadata changes', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const persistence = createLocalPlayerQueuePersistence(storage, 'queue')
+    const initial = snapshot()
+    persistence.save(initial)
+    persistence.save({ ...initial, volume: 0.2, progress: 12 })
+
+    expect(storage.setItem.mock.calls.filter(([key]) => key === 'queue.queue')).toHaveLength(1)
+    expect(storage.setItem.mock.calls.filter(([key]) => key === 'queue.state')).toHaveLength(2)
+    expect(persistence.load()).toEqual({ ...initial, volume: 0.2, progress: 12 })
+  })
+
+  it('keeps the previous split snapshot when a later storage write fails', () => {
+    const values = new Map<string, string>()
+    let failStateWrite = false
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        if (failStateWrite && key === 'queue.state') throw new Error('quota')
+        values.set(key, value)
+      }),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const persistence = createLocalPlayerQueuePersistence(storage, 'queue')
+    const initial = snapshot()
+    persistence.save(initial)
+    failStateWrite = true
+
+    expect(() => persistence.save({ ...initial, volume: 0.1 })).toThrow('quota')
+    expect(createLocalPlayerQueuePersistence(storage, 'queue').load()).toEqual(initial)
+  })
 })
