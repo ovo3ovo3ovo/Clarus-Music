@@ -77,10 +77,13 @@ export function createLyricsStore(
 
     function open(): void {
       visible.value = true
+      const trackId = displayedTrackId()
+      if (trackId !== null && lyrics.value === null && !loading.value) void load(trackId)
     }
 
     function close(): void {
       visible.value = false
+      if (controller !== null) cancel('Lyrics overlay closed')
     }
 
     function toggle(): void {

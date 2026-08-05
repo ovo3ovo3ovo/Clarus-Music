@@ -257,6 +257,46 @@ export function createLocalPlayerQueuePersistence(
     obsoleteStateRevision = 0
   }
 
+  const readVersionedSnapshot = (
+    queueRevisionToRead: number,
+    stateRevisionToRead: number,
+  ): PlayerQueueSnapshot | null => {
+    if (queueRevisionToRead <= 0 || stateRevisionToRead <= 0) return null
+    try {
+      const queueRecord = JSON.parse(
+        storage.getItem(versionedKey(queueKey, queueRevisionToRead)) ?? 'null',
+      ) as QueueStructureRecord
+      const stateRecord = JSON.parse(
+        storage.getItem(versionedKey(stateKey, stateRevisionToRead)) ?? 'null',
+      ) as PlaybackStateRecord
+      if (
+        queueRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
+        stateRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
+        queueRecord.revision !== queueRevisionToRead ||
+        stateRecord.revision !== stateRevisionToRead
+      ) {
+        return null
+      }
+      return parsePlayerQueueSnapshot({
+        version: PLAYER_QUEUE_SNAPSHOT_VERSION,
+        queue: queueRecord.queue,
+        playNextQueue: queueRecord.playNextQueue,
+        currentTrack: stateRecord.currentTrack,
+        currentIndex: stateRecord.currentIndex,
+        currentIsPlayNext: stateRecord.currentIsPlayNext,
+        queueSource: queueRecord.queueSource,
+        playbackOrder: queueRecord.playbackOrder,
+        repeatMode: stateRecord.repeatMode,
+        shuffle: stateRecord.shuffle,
+        reversed: stateRecord.reversed,
+        volume: stateRecord.volume,
+        progress: stateRecord.progress,
+      })
+    } catch {
+      return null
+    }
+  }
+
   return {
     load() {
       try {
@@ -275,6 +315,7 @@ export function createLocalPlayerQueuePersistence(
         const usesVersionedRecords =
           isSplit && parsedQueueRevision !== null && parsedStateRevision !== null
         let snapshot: PlayerQueueSnapshot | null
+        let recoveredPreviousGeneration = false
         if (usesVersionedRecords) {
           queueRevision = parsedQueueRevision
           stateRevision = parsedStateRevision
@@ -284,35 +325,27 @@ export function createLocalPlayerQueuePersistence(
           obsoleteStateRevision = positiveInteger(parsed.previousStateRevision)
             ? parsed.previousStateRevision
             : 0
-          const queueRecord = JSON.parse(
-            storage.getItem(versionedKey(queueKey, parsedQueueRevision)) ?? 'null',
-          ) as QueueStructureRecord
-          const stateRecord = JSON.parse(
-            storage.getItem(versionedKey(stateKey, parsedStateRevision)) ?? 'null',
-          ) as PlaybackStateRecord
-          if (
-            queueRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
-            stateRecord?.storageVersion !== SPLIT_STORAGE_VERSION ||
-            queueRecord.revision !== parsedQueueRevision ||
-            stateRecord.revision !== parsedStateRevision
-          ) {
-            snapshot = null
-          } else {
-            snapshot = parsePlayerQueueSnapshot({
-              version: PLAYER_QUEUE_SNAPSHOT_VERSION,
-              queue: queueRecord.queue,
-              playNextQueue: queueRecord.playNextQueue,
-              currentTrack: stateRecord.currentTrack,
-              currentIndex: stateRecord.currentIndex,
-              currentIsPlayNext: stateRecord.currentIsPlayNext,
-              queueSource: queueRecord.queueSource,
-              playbackOrder: queueRecord.playbackOrder,
-              repeatMode: stateRecord.repeatMode,
-              shuffle: stateRecord.shuffle,
-              reversed: stateRecord.reversed,
-              volume: stateRecord.volume,
-              progress: stateRecord.progress,
-            })
+          snapshot = readVersionedSnapshot(parsedQueueRevision, parsedStateRevision)
+          if (snapshot === null) {
+            const previousQueueRevision = positiveInteger(parsed.previousQueueRevision)
+              ? parsed.previousQueueRevision
+              : parsedQueueRevision
+            const previousStateRevision = positiveInteger(parsed.previousStateRevision)
+              ? parsed.previousStateRevision
+              : parsedStateRevision
+            if (
+              previousQueueRevision !== parsedQueueRevision ||
+              previousStateRevision !== parsedStateRevision
+            ) {
+              snapshot = readVersionedSnapshot(previousQueueRevision, previousStateRevision)
+              if (snapshot !== null) {
+                queueRevision = previousQueueRevision
+                stateRevision = previousStateRevision
+                obsoleteQueueRevision = 0
+                obsoleteStateRevision = 0
+                recoveredPreviousGeneration = true
+              }
+            }
           }
         } else if (isSplit && parsedRevision !== null) {
           const queueRecord = JSON.parse(
@@ -348,6 +381,16 @@ export function createLocalPlayerQueuePersistence(
         }
         if (snapshot === null) {
           clearStoredRecords()
+        } else if (usesVersionedRecords && recoveredPreviousGeneration) {
+          // Keep the previous complete records in place. The next successful
+          // save publishes a fresh marker and can then retire the incomplete
+          // generation without losing the recovered snapshot.
+          lastStructure = {
+            queue: snapshot.queue,
+            playNextQueue: snapshot.playNextQueue,
+            playbackOrder: snapshot.playbackOrder,
+            queueSource: snapshot.queueSource,
+          }
         } else if (usesVersionedRecords) {
           // Rehydrate the in-memory bookkeeping as well as the public snapshot.
           // Without this, the first playback-only update after app restart is

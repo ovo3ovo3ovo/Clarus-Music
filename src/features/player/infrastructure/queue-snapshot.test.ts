@@ -154,6 +154,38 @@ describe('player queue snapshots', () => {
     expect(values.has('queue.queue.1')).toBe(true)
   })
 
+  it('falls back to the previous committed generation when the marker is incomplete', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const initial = snapshot()
+    createLocalPlayerQueuePersistence(storage, 'queue').save(initial)
+
+    // A marker may survive after one of the referenced records is lost or
+    // corrupted. The previous generation is still a complete snapshot and
+    // must be preferred over clearing all persisted playback state.
+    values.set(
+      'queue',
+      JSON.stringify({
+        storageVersion: 1,
+        storage: 'split',
+        queueRevision: 2,
+        stateRevision: 2,
+        previousQueueRevision: 1,
+        previousStateRevision: 1,
+      }),
+    )
+
+    const restored = createLocalPlayerQueuePersistence(storage, 'queue').load()
+    expect(restored).toEqual(initial)
+    expect(values.has('queue')).toBe(true)
+    expect(values.has('queue.queue.1')).toBe(true)
+    expect(values.has('queue.state.1')).toBe(true)
+  })
+
   it('keeps the previous split snapshot when a later storage write fails', () => {
     const values = new Map<string, string>()
     let failStateWrite = false

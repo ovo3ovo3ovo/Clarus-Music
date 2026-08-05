@@ -69,6 +69,41 @@ describe('lyrics store', () => {
     expect(lyrics.scrollTop).toBe(321)
   })
 
+  it('cancels a hidden in-flight request and retries it when reopened', async () => {
+    const first = deferred<TrackLyrics>()
+    const second = deferred<TrackLyrics>()
+    const signals: AbortSignal[] = []
+    const gateway = {
+      load: vi.fn((_: number, signal?: AbortSignal) => {
+        if (signal) signals.push(signal)
+        return signals.length === 1 ? first.promise : second.promise
+      }),
+    }
+    player.currentTrack = { id: 11 }
+    const lyrics = createLyricsStore(gateway, 'lyricsCloseAbortTest', player)()
+
+    await Promise.resolve()
+    expect(lyrics.loading).toBe(true)
+    lyrics.close()
+    expect(signals[0]?.aborted).toBe(true)
+    expect(lyrics.loading).toBe(false)
+
+    lyrics.open()
+    await Promise.resolve()
+    expect(gateway.load).toHaveBeenCalledTimes(2)
+    second.resolve(translated)
+    await second.promise
+    await Promise.resolve()
+    expect(lyrics.lyrics).toBe(translated)
+
+    // Resolve the cancelled request after the retry; its result must remain
+    // ignored even if the gateway does not reject promptly on abort.
+    first.resolve({ instrumental: true, lines: [] })
+    await first.promise
+    await Promise.resolve()
+    expect(lyrics.lyrics).toBe(translated)
+  })
+
   it('cancels a previous song and prevents its stale result from winning', async () => {
     const first = deferred<TrackLyrics>()
     const second = deferred<TrackLyrics>()
