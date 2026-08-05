@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises'
+import {
+  link,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  unlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { setTimeout } from 'node:timers'
@@ -18,6 +30,7 @@ import {
   parseFootprintOutput,
   parseTopOutput,
   runExternalSampler,
+  SamplingError,
   spawnFixedTool,
 } from './external-sampler.mjs'
 import { AFINFO_EXECUTABLE } from '../fixtures/fixture-verifier.mjs'
@@ -613,6 +626,10 @@ test('runs deterministic external sampling with fixture verification, warmup rem
   const report = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
   validateRunReport(report)
   assert.equal(report.status, 'completed')
+  assert.equal(
+    (await readdir(harness.output)).some((entry) => entry.includes('.run.json.')),
+    false,
+  )
   assert.equal(report.measurements.filter((entry) => entry.phase === 'top').length, 40)
   assert.equal(
     report.measurements.find(
@@ -709,6 +726,58 @@ test('pre-top fixture verification stops changed-then-restored fixture drift bef
     harness.calls.some((call) => call.file === '/usr/bin/top'),
     false,
   )
+})
+
+test('fixture bytes changed and restored before the first witness make the run unusable', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  const fixturePath = join(
+    harness.repositoryRoot,
+    'artifacts',
+    'perf',
+    'fixtures',
+    'current',
+    'tone-short-mp3.mp3',
+  )
+  const originalBytes = await readFile(fixturePath)
+  let injected = false
+  harness.dependencies.writeNewFile = async (pathname, contents) => {
+    const result = await writeNewFile(pathname, contents)
+    if (pathname.endsWith('/raw/fixtures.lock.json') && !injected) {
+      injected = true
+      await writeFile(fixturePath, Buffer.from('x'))
+      await writeFile(fixturePath, originalBytes)
+    }
+    return result
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(injected, true)
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.report.failure.code, 'FIXTURE_DRIFT')
+  assert.equal(result.report.usable, false)
+})
+
+test('post-baseline fixture verifier SamplingError is normalized to FIXTURE_DRIFT', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  const originalVerifier = harness.dependencies.fixtureVerifier
+  let verifierCalls = 0
+  harness.dependencies.fixtureVerifier = async (argumentsValue) => {
+    verifierCalls += 1
+    if (verifierCalls === 2) {
+      throw new SamplingError('TOOL_ERROR', 'fixture', 'fixture verifier tool failed')
+    }
+    return originalVerifier(argumentsValue)
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(verifierCalls, 2)
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.report.failure.code, 'FIXTURE_DRIFT')
+  assert.equal(result.report.usable, false)
 })
 
 test('fixture bytes changed and restored during top still make the run unusable', async (t) => {
@@ -1268,6 +1337,91 @@ test('a staging rename failure leaves no usable run.json and returns a schema-va
   assert.equal(result.report.usable, false)
   assert.doesNotThrow(() => validateRunReport(result.report))
   await assert.rejects(readFile(join(harness.output, 'run.json')), { code: 'ENOENT' })
+})
+
+test('an unowned run.json created from the rename seam is never overwritten by the commit', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let injected = false
+  const foreignContents = 'foreign-run-report'
+  harness.dependencies.rename = async (fromPath, toPath) => {
+    if (!injected) {
+      injected = true
+      await writeFile(join(harness.output, 'run.json'), foreignContents)
+    }
+    return rename(fromPath, toPath)
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(injected, true)
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.report.usable, false)
+  assert.equal(await readFile(join(harness.output, 'run.json'), 'utf8'), foreignContents)
+})
+
+test('a publish seam that throws after creating run.json is reconciled as completed', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let published = false
+  harness.dependencies.link = async (fromPath, toPath) => {
+    await link(fromPath, toPath)
+    published = true
+    throw new Error('publish acknowledgement failed')
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(published, true)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.report.status, 'completed')
+  assert.equal(result.report.usable, true)
+  const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
+  assert.equal(emitted.status, 'completed')
+  assert.equal(emitted.usable, true)
+})
+
+test('a SIGTERM after the first report rename cannot return interruption while a completed report remains', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  let completedRename = false
+  let failureStageAttempted = false
+  let cleanupAttempted = false
+  harness.dependencies.rename = async (fromPath, toPath) => {
+    await rename(fromPath, toPath)
+    if (!completedRename) {
+      completedRename = true
+      harness.signalSource.emit('SIGTERM')
+    }
+  }
+  harness.dependencies.writeNewFile = async (pathname, contents) => {
+    if (pathname.includes('/.run.json.') && completedRename) {
+      failureStageAttempted = true
+      await writeFile(pathname, String(contents).slice(0, 7))
+      throw Object.assign(new Error('output became read-only'), { code: 'EACCES' })
+    }
+    return writeNewFile(pathname, contents)
+  }
+  harness.dependencies.unlink = async (pathname) => {
+    if (pathname.includes('/.run.json.')) {
+      cleanupAttempted = true
+      throw Object.assign(new Error('cleanup became read-only'), { code: 'EACCES' })
+    }
+    return unlink(pathname)
+  }
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(completedRename, true)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.report.status, 'completed')
+  assert.equal(result.report.usable, true)
+  const emitted = JSON.parse(await readFile(join(harness.output, 'run.json'), 'utf8'))
+  assert.equal(emitted.status, 'completed')
+  assert.equal(emitted.usable, true)
+  assert.equal(failureStageAttempted, true)
+  assert.equal(cleanupAttempted, true)
+  assert.equal(result.cleanupError?.code, 'EACCES')
 })
 
 test('an existing unowned run.json is never overwritten by completed or failure reporting', async (t) => {

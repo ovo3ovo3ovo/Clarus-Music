@@ -88,7 +88,7 @@ outputDevice, networkProfile, settingsFixture, queueFixture, fixtureRoles, notes
 
 `scenario` and `runId` use `[a-z0-9][a-z0-9._-]{0,63}`. This sampler accepts only `scenarioClass: "runtime"`; `startup` is refused. `fixtureRoles` must be unique and present in the fixture lock verified immediately before sampling. Regenerating or changing the fixture directory during a run makes it unusable.
 
-The sampler creates one new strict child under `artifacts/perf/runs`. A completed v1 report contains `run.json`, RFC 4180 `measurements.csv`, `summary.txt`, and checksummed evidence under `raw/` (metadata, fixture lock, and deterministic stdout/stderr files). `run.json` is committed from an exclusive staging file with an atomic rename; failed/interrupted reports use the same transaction and an output commit failure may leave no `run.json`. An existing `run.json` not created by the current run is never overwritten. `summary.txt` begins:
+The sampler creates one new strict child under `artifacts/perf/runs`. A completed v1 report contains `run.json`, RFC 4180 `measurements.csv`, `summary.txt`, and checksummed evidence under `raw/` (metadata, fixture lock, and deterministic stdout/stderr files). `run.json` is committed from an exclusive staging file through an atomic no-replace publish; failed/interrupted reports use the same transaction and an output commit failure may leave no `run.json`. An existing `run.json` not created by the current run is never overwritten. `summary.txt` begins:
 
 ```text
 MEASUREMENT INFRASTRUCTURE OUTPUT — NOT EVIDENCE OF PRODUCT IMPROVEMENT.

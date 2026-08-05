@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { Buffer } from 'node:buffer'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
+import { link, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { totalmem, cpus } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
@@ -1081,6 +1081,8 @@ export async function runExternalSampler(options, dependencies = {}) {
   const outputLimits = normalizeOutputLimits(dependencies.outputLimits)
   const writeArtifact = dependencies.writeNewFile ?? writeNewFile
   const renameArtifact = dependencies.rename ?? rename
+  const linkArtifact = dependencies.link ?? link
+  const unlinkArtifact = dependencies.unlink ?? unlink
   let retainedToolOutputBytes = 0
   const state = {
     requestedAt: timestampNow(now),
@@ -1109,7 +1111,9 @@ export async function runExternalSampler(options, dependencies = {}) {
   let fixtureVerifierClose
   let fixtureIntegrityGuard
   let completedRunContents
+  let completedRunReport
   let runReportOwned = false
+  let reportCleanupError
   let disposed = false
   const removeSignalListeners = () => {
     if (!disposed && signalSource && typeof signalSource.off === 'function') {
@@ -1182,51 +1186,106 @@ export async function runExternalSampler(options, dependencies = {}) {
       return 'unowned'
     }
   }
-  const commitRunReport = async (contents, { requireNoSignal = false } = {}) => {
+  const commitRunReport = async (
+    contents,
+    { requireNoSignal = false, recordCompleted = false } = {},
+  ) => {
     const expectedOwnership = runReportOwned ? 'owned' : 'absent'
     if ((await inspectRunReportOwnership()) !== expectedOwnership) {
       return false
     }
     const stagingPath = join(outputPath, `.run.json.${randomUUID()}.staging`)
+    const preparedPath = join(outputPath, `.run.json.${randomUUID()}.prepared`)
     let staged = true
+    let prepared = false
+    let publicationAttempted = false
     try {
       await writeArtifact(stagingPath, contents)
       if (requireNoSignal && signalState.signal) {
         return false
       }
-      if ((await inspectRunReportOwnership()) !== expectedOwnership) {
+      await renameArtifact(stagingPath, preparedPath)
+      staged = false
+      prepared = true
+      if (expectedOwnership === 'owned') {
         return false
       }
-      await renameArtifact(stagingPath, runPath())
-      staged = false
+      publicationAttempted = true
+      await linkArtifact(preparedPath, runPath())
       runReportOwned = true
-      completedRunContents = Buffer.from(contents, 'utf8')
+      if (recordCompleted) {
+        completedRunContents = Buffer.from(contents, 'utf8')
+      }
       return true
     } catch {
+      if (publicationAttempted) {
+        try {
+          const [preparedDetails, publishedDetails] = await Promise.all([
+            lstat(preparedPath),
+            lstat(runPath()),
+          ])
+          if (
+            preparedDetails.isFile() &&
+            publishedDetails.isFile() &&
+            preparedDetails.dev === publishedDetails.dev &&
+            preparedDetails.ino === publishedDetails.ino
+          ) {
+            const published = await readNoFollowRegularFile(runPath(), {
+              label: 'run report after publish failure',
+              maxBytes: OUTPUT_LIMIT_BYTES.total,
+            })
+            if (published.equals(Buffer.from(contents, 'utf8'))) {
+              runReportOwned = true
+              if (recordCompleted) {
+                completedRunContents = Buffer.from(contents, 'utf8')
+              }
+              return true
+            }
+          }
+        } catch {
+          // The target remains unowned when it cannot be proven to contain this report.
+        }
+      }
       return false
     } finally {
       if (staged) {
-        await unlink(stagingPath).catch(() => {})
+        try {
+          await unlinkArtifact(stagingPath)
+        } catch (error) {
+          if (error?.code !== 'ENOENT') {
+            reportCleanupError ??= error
+          }
+        }
+      }
+      if (prepared) {
+        try {
+          await unlinkArtifact(preparedPath)
+        } catch (error) {
+          if (error?.code !== 'ENOENT') {
+            reportCleanupError ??= error
+          }
+        }
       }
     }
   }
-  const removeOwnedRunReport = async () => {
-    if (runReportOwned && (await inspectRunReportOwnership()) === 'owned') {
-      await unlink(runPath()).catch(() => {})
-    }
-    runReportOwned = false
-  }
   const writeCompletedRunReport = async (report) => {
     const contents = `${JSON.stringify(report, null, 2)}\n`
-    if (!(await commitRunReport(contents, { requireNoSignal: true }))) {
+    if (!(await commitRunReport(contents, { requireNoSignal: true, recordCompleted: true }))) {
       samplingError('OUTPUT_COMMIT', 'output', 'could not atomically commit completed run report')
+    }
+    completedRunReport = report
+    if (reportCleanupError) {
+      samplingError(
+        'OUTPUT_CLEANUP',
+        'output',
+        `completed run report cleanup failed: ${safeErrorMessage(reportCleanupError)}`,
+        reportCleanupError,
+      )
     }
   }
   const writeFailureRunReport = async (report) => {
     const contents = `${JSON.stringify(report, null, 2)}\n`
-    if (!(await commitRunReport(contents))) {
-      await removeOwnedRunReport()
-    }
+    return commitRunReport(contents)
   }
   const executeTool = async (
     phase,
@@ -1371,9 +1430,6 @@ export async function runExternalSampler(options, dependencies = {}) {
       if (signalState.signal) {
         throw new InterruptedError(signalState.signal)
       }
-      if (error instanceof SamplingError) {
-        throw error
-      }
       if (fixtureBaselineVerified) {
         samplingError(
           'FIXTURE_DRIFT',
@@ -1381,6 +1437,9 @@ export async function runExternalSampler(options, dependencies = {}) {
           `fixture verification failed during sampling: ${safeErrorMessage(error)}`,
           error,
         )
+      }
+      if (error instanceof SamplingError) {
+        throw error
       }
       if (error instanceof PerfInputError) {
         throw error
@@ -1586,8 +1645,10 @@ export async function runExternalSampler(options, dependencies = {}) {
     const verified = await verifyFixtures(verifier, options.fixtureDirectory)
     assertNotInterrupted()
     fixtureVerifierClose = verified.close
-    const lockPath = join(verified.directory, 'fixtures.lock.json')
+    fixtureIntegrityGuard = await retainFixtureIntegrityGuard(verified)
+    assertNotInterrupted()
     fixtureBaselineVerified = true
+    const lockPath = join(verified.directory, 'fixtures.lock.json')
     const lockBytes = await readFixtureLock(lockPath, 'fixture lock')
     assertFixtureLockBytesMatch(lockBytes, verified.lock, 'fixture lock')
     await writeRaw('raw/fixtures.lock.json', 'fixture-lock', lockBytes)
@@ -1600,7 +1661,7 @@ export async function runExternalSampler(options, dependencies = {}) {
       recipeVersion: verified.lock.recipeVersion,
       roles: normalizeFixtureRoles(verified.lock),
     }
-    fixtureIntegrityGuard = await retainFixtureIntegrityGuard(verified)
+    await fixtureIntegrityGuard.assertUnchanged('initial-baseline')
     assertNotInterrupted()
     state.metadata = validateMetadataInput(state.metadata, {
       fixtureRoles: new Set(state.fixture.roles.map((role) => role.role)),
@@ -1909,6 +1970,15 @@ export async function runExternalSampler(options, dependencies = {}) {
     const report = makeFailureReport(state, error, status)
     if (outputPath) {
       await writeFailureRunReport(report)
+      if (completedRunReport && (await inspectRunReportOwnership()) === 'owned') {
+        return {
+          exitCode: 0,
+          outputPath,
+          report: completedRunReport,
+          error,
+          ...(reportCleanupError ? { cleanupError: reportCleanupError } : {}),
+        }
+      }
     }
     return { exitCode, outputPath, report, error }
   } finally {
