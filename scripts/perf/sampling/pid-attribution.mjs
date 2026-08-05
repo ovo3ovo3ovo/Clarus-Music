@@ -30,6 +30,14 @@ const HELPER_BUNDLE_IDS = Object.freeze({
   networking: 'com.apple.WebKit.Networking',
 })
 
+function isCanonicalWebKitHelperPath(pathname) {
+  const normalized = resolve(pathname)
+  if (normalized.startsWith('/System/Library/Frameworks/WebKit.framework/')) return true
+  return /^\/System\/Volumes\/Preboot\/Cryptexes\/[^/]+\/System\/Library\/Frameworks\/WebKit\.framework\//.test(
+    normalized,
+  )
+}
+
 function hasControlCharacters(value) {
   return [...value].some((character) => {
     const code = character.charCodeAt(0)
@@ -800,8 +808,16 @@ export async function captureMacosAttribution({
   for (const role of ['web-content', 'gpu', 'networking']) {
     const expectedPath = helperPaths?.[role] ?? DEFAULT_HELPER_PATHS[role]
     assertPath(expectedPath, `canonical ${role} helper path`)
+    if (!isCanonicalWebKitHelperPath(expectedPath)) {
+      fail('HELPER_PATH_OUTSIDE', `canonical ${role} helper is outside WebKit framework roots`)
+    }
     try {
-      effectiveHelperPaths[role] = await resolveRealpath(expectedPath)
+      const resolvedPath = await resolveRealpath(expectedPath)
+      assertPath(resolvedPath, `canonical ${role} helper realpath`)
+      if (!isCanonicalWebKitHelperPath(resolvedPath)) {
+        fail('HELPER_REALPATH_OUTSIDE', `canonical ${role} helper realpath is outside WebKit roots`)
+      }
+      effectiveHelperPaths[role] = resolvedPath
     } catch {
       fail('REALPATH_UNAVAILABLE', `could not resolve canonical ${role} helper path`)
     }

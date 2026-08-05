@@ -456,7 +456,18 @@ test('captures every unknown member of the root LaunchServices coalition', async
       }
     }
     const pid = Number(argv[2])
-    if (pid === audio.pid) return { stdout: 'bundleID=[ NULL ] executable path=[ NULL ] pid = ' }
+    if (pid === audio.pid) {
+      return {
+        stdout: JSON.stringify([
+          infoRecord({
+            pid: audio.pid,
+            path: audio.path,
+            bundleId: 'com.apple.audio.SandboxHelper',
+            coalition: { id: 'other', asn: '0xother' },
+          }),
+        ]),
+      }
+    }
     return { stdout: JSON.stringify([infoByPid.get(pid)]) }
   }
   const result = await captureMacosAttribution({
@@ -519,6 +530,72 @@ test('fails closed when realpath resolution of the root process fails', async ()
       },
     }),
     /realpath/i,
+  )
+})
+
+test('rejects a canonical WebKit helper that real-resolves outside Apple WebKit roots', async () => {
+  const root = processRecord({ pid: 4101, path: EXECUTABLE })
+  const web = processRecord({ pid: 4102, path: DEFAULT_HELPER_PATHS['web-content'] })
+  const gpu = processRecord({ pid: 4103, path: DEFAULT_HELPER_PATHS.gpu })
+  const networking = processRecord({ pid: 4104, path: DEFAULT_HELPER_PATHS.networking })
+  const coalition = { id: '17', asn: '0x40000017' }
+  const resolvedGpu = '/tmp/evil-webkit-gpu'
+  const infoByPid = new Map([
+    [root.pid, infoRecord({ pid: root.pid, path: EXECUTABLE, bundleId: EXPECTED_BUNDLE_ID })],
+    [
+      web.pid,
+      infoRecord({ pid: web.pid, path: web.path, bundleId: 'com.apple.WebKit.WebContent' }),
+    ],
+    [gpu.pid, infoRecord({ pid: gpu.pid, path: resolvedGpu, bundleId: 'com.apple.WebKit.GPU' })],
+    [
+      networking.pid,
+      infoRecord({
+        pid: networking.pid,
+        path: networking.path,
+        bundleId: 'com.apple.WebKit.Networking',
+      }),
+    ],
+  ])
+  await assert.rejects(
+    captureMacosAttribution({
+      rootPid: 4101,
+      bundle: {
+        appBundlePath: BUNDLE,
+        expectedBundlePath: BUNDLE,
+        executablePath: EXECUTABLE,
+        executableRealpath: EXECUTABLE,
+        bundleId: EXPECTED_BUNDLE_ID,
+        bundleVersion: '0.1.0',
+      },
+      helperPaths: DEFAULT_HELPER_PATHS,
+      resolveRealpath: async (pathname) =>
+        pathname === DEFAULT_HELPER_PATHS.gpu ? resolvedGpu : pathname,
+      runCommand: async (executable, argv) => {
+        if (executable === '/bin/ps') {
+          return {
+            stdout: [root, web, gpu, networking]
+              .map(({ pid, ppid, start, path }) => `${pid}\t${ppid}\t${start}\t${path}`)
+              .join('\n'),
+          }
+        }
+        if (argv[0] === 'list') {
+          return {
+            stdout: JSON.stringify([
+              {
+                pid: root.pid,
+                path: EXECUTABLE,
+                realpath: EXECUTABLE,
+                bundleId: EXPECTED_BUNDLE_ID,
+                coalition,
+                coalitionMembers: [root.pid, web.pid, gpu.pid, networking.pid],
+              },
+            ]),
+          }
+        }
+        return { stdout: JSON.stringify([infoByPid.get(Number(argv[2]))]) }
+      },
+    }),
+    /realpath|helper/i,
   )
 })
 

@@ -482,6 +482,21 @@ test('metadata paths must stay under the repository without absolute, traversal,
   assert.equal(symlinkResult.exitCode, 2)
 })
 
+test('a missing lock-listed fixture is an input refusal before sampling starts', async (t) => {
+  const harness = await createHarness()
+  t.after(() => rm(harness.temporary, { recursive: true, force: true }))
+  await rm(
+    join(harness.repositoryRoot, 'artifacts', 'perf', 'fixtures', 'current', 'tone-short-mp3.mp3'),
+  )
+
+  const result = await runExternalSampler(harness.options, harness.dependencies)
+
+  assert.equal(result.exitCode, 2)
+  assert.equal(result.report.failure.code, 'INPUT_REFUSAL')
+  assert.equal(result.report.failure.phase, 'unknown')
+  assert.equal(result.report.usable, false)
+})
+
 test('top and footprint parsers require complete fixed-PID numeric evidence and discard no data themselves', () => {
   const groups = parseTopOutput(topOutput(), { pids: [4101, 4102, 4103, 4104] })
   assert.equal(groups.length, 6)

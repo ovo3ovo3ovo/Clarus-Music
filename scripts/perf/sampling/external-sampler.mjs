@@ -838,6 +838,16 @@ function retainInitialFixtureIntegrityGuard(directory) {
       closeSync(lockFd)
       return null
     }
+    for (const filename of names) {
+      try {
+        lstatSync(join(resolvedDirectory, filename), { bigint: true })
+      } catch (error) {
+        if (error?.code === 'ENOENT') {
+          throw new PerfInputError(`Fixture input is missing: ${filename}`)
+        }
+        throw error
+      }
+    }
     const guard = retainFixtureIntegrityGuardSyncFromPaths([
       { label: 'fixture lock', pathname: lockPath },
       ...names.map((filename) => ({
@@ -857,7 +867,7 @@ function retainInitialFixtureIntegrityGuard(directory) {
         // Best effort cleanup before verifier-owned validation runs.
       }
     }
-    if (error instanceof SamplingError) {
+    if (error instanceof SamplingError || error instanceof PerfInputError) {
       throw error
     }
     return null
