@@ -116,6 +116,32 @@ describe('player queue snapshots', () => {
     expect(persistence.load()).toEqual({ ...initial, volume: 0.2, progress: 12 })
   })
 
+  it('prefers a valid legacy snapshot changed by an older app over a stale split marker', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const persistence = createLocalPlayerQueuePersistence(storage, 'queue')
+    const initial = snapshot()
+    const next = {
+      ...initial,
+      queue: [initial.queue[0]!, track(3)],
+      currentTrack: initial.queue[0]!,
+      queueSource: 'album:202',
+      playbackOrder: [0, 1],
+    }
+    persistence.save(initial)
+    persistence.save(next)
+
+    // Simulate an older app writing the legacy key while leaving the new
+    // marker untouched during a rollback window.
+    values.set('queue', JSON.stringify(initial))
+
+    expect(createLocalPlayerQueuePersistence(storage, 'queue').load()).toEqual(initial)
+  })
+
   it('rehydrates split bookkeeping after a reload', () => {
     const values = new Map<string, string>()
     const storage = {

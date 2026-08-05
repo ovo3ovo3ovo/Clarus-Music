@@ -69,6 +69,18 @@ function positiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
 
+function legacySnapshotFingerprint(serialized: string): string {
+  // This is a change detector, not a security primitive. FNV-1a keeps the
+  // marker tiny while distinguishing a legacy write from the intentionally
+  // stale shadow retained for playback-only updates.
+  let hash = 2_166_136_261
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash ^= serialized.charCodeAt(index)
+    hash = Math.imul(hash, 16_777_619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
 function nonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
@@ -207,6 +219,7 @@ export function createLocalPlayerQueuePersistence(
   let obsoleteQueueRevision = 0
   let obsoleteStateRevision = 0
   let legacyNeedsWrite = false
+  let legacyFingerprint: string | null = null
   let lastStructure:
     | {
         readonly queue: readonly Track[]
@@ -238,6 +251,7 @@ export function createLocalPlayerQueuePersistence(
     obsoleteQueueRevision = 0
     obsoleteStateRevision = 0
     legacyNeedsWrite = false
+    legacyFingerprint = null
     lastStructure = undefined
     if (propagateErrors && firstError !== null) throw firstError
   }
@@ -320,6 +334,15 @@ export function createLocalPlayerQueuePersistence(
         const legacyRecord = parseRecord(legacyRaw)
         const markerIsVersioned =
           markerRecord?.storageVersion === SPLIT_STORAGE_VERSION && markerRecord.storage === 'split'
+        const markerFingerprint =
+          typeof markerRecord?.legacyFingerprint === 'string'
+            ? markerRecord.legacyFingerprint
+            : null
+        const legacyChangedSinceMarker =
+          markerIsVersioned &&
+          markerFingerprint !== null &&
+          legacyRaw !== null &&
+          legacySnapshotFingerprint(legacyRaw) !== markerFingerprint
         const parsed = markerIsVersioned ? markerRecord : legacyRecord
         if (parsed === null) {
           clearStoredRecords()
@@ -406,6 +429,17 @@ export function createLocalPlayerQueuePersistence(
         } else {
           snapshot = parsePlayerQueueSnapshot(parsed)
         }
+        if (legacyChangedSinceMarker) {
+          const legacySnapshot = parsePlayerQueueSnapshot(legacyRecord)
+          if (legacySnapshot !== null) {
+            snapshot = legacySnapshot
+            queueRevision = 0
+            stateRevision = 0
+            obsoleteQueueRevision = 0
+            obsoleteStateRevision = 0
+            recoveredLegacySnapshot = true
+          }
+        }
         if (snapshot === null && usesVersionedRecords) {
           const legacySnapshot = parsePlayerQueueSnapshot(legacyRecord)
           if (legacySnapshot !== null) {
@@ -427,6 +461,7 @@ export function createLocalPlayerQueuePersistence(
           } catch {
             // Best effort; the fallback remains available for this process.
           }
+          legacyFingerprint = null
           lastStructure = undefined
         } else if (usesVersionedRecords && recoveredPreviousGeneration) {
           // Keep the previous complete records in place. The next successful
@@ -475,15 +510,22 @@ export function createLocalPlayerQueuePersistence(
           lastStructure = undefined
         }
 
+        if (markerIsVersioned) legacyFingerprint = markerFingerprint
         if (
           !recoveredLegacySnapshot &&
           (usesVersionedRecords || (isSplit && parsedRevision !== null))
         ) {
           const legacySnapshot = parsePlayerQueueSnapshot(legacyRecord)
-          legacyNeedsWrite = legacySnapshot === null || markerAtLegacyKey
+          legacyNeedsWrite =
+            legacySnapshot === null ||
+            markerAtLegacyKey ||
+            (markerIsVersioned && markerFingerprint === null)
+          legacyFingerprint = markerFingerprint
           if (legacyNeedsWrite) {
             try {
-              storage.setItem(key, JSON.stringify(snapshot))
+              const legacyPayload = JSON.stringify(snapshot)
+              storage.setItem(key, legacyPayload)
+              legacyFingerprint = legacySnapshotFingerprint(legacyPayload)
               if (usesVersionedRecords) {
                 storage.setItem(
                   markerKey,
@@ -494,6 +536,7 @@ export function createLocalPlayerQueuePersistence(
                     stateRevision,
                     previousQueueRevision: null,
                     previousStateRevision: null,
+                    legacyFingerprint,
                   }),
                 )
               }
@@ -541,6 +584,7 @@ export function createLocalPlayerQueuePersistence(
       const previousObsoleteQueueRevision = obsoleteQueueRevision
       const previousObsoleteStateRevision = obsoleteStateRevision
       const previousLegacyNeedsWrite = legacyNeedsWrite
+      const previousLegacyFingerprint = legacyFingerprint
       const previousStructure = lastStructure
       try {
         if (structureChanged) {
@@ -569,7 +613,9 @@ export function createLocalPlayerQueuePersistence(
         }
         storage.setItem(versionedKey(stateKey, nextStateRevision), JSON.stringify(stateRecord))
         if (structureChanged || legacyNeedsWrite) {
-          storage.setItem(key, JSON.stringify(snapshot))
+          const legacyPayload = JSON.stringify(snapshot)
+          storage.setItem(key, legacyPayload)
+          legacyFingerprint = legacySnapshotFingerprint(legacyPayload)
         }
         storage.setItem(
           markerKey,
@@ -580,6 +626,7 @@ export function createLocalPlayerQueuePersistence(
             stateRevision: nextStateRevision,
             previousQueueRevision: staleQueueRevision > 0 ? staleQueueRevision : null,
             previousStateRevision: staleStateRevision > 0 ? staleStateRevision : null,
+            legacyFingerprint,
           }),
         )
         legacyNeedsWrite = false
@@ -600,6 +647,7 @@ export function createLocalPlayerQueuePersistence(
         obsoleteQueueRevision = previousObsoleteQueueRevision
         obsoleteStateRevision = previousObsoleteStateRevision
         legacyNeedsWrite = previousLegacyNeedsWrite
+        legacyFingerprint = previousLegacyFingerprint
         lastStructure = previousStructure
         for (const [storageKey, value] of previousValues) {
           try {
