@@ -87,7 +87,8 @@ export function createLyricsStore(
     }
 
     function toggle(): void {
-      visible.value = !visible.value
+      if (visible.value) close()
+      else open()
     }
 
     function switchMode(nextMode: LyricMode): void {

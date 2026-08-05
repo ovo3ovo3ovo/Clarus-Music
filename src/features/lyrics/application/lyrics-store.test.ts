@@ -84,11 +84,12 @@ describe('lyrics store', () => {
 
     await Promise.resolve()
     expect(lyrics.loading).toBe(true)
-    lyrics.close()
+    lyrics.open()
+    lyrics.toggle()
     expect(signals[0]?.aborted).toBe(true)
     expect(lyrics.loading).toBe(false)
 
-    lyrics.open()
+    lyrics.toggle()
     await Promise.resolve()
     expect(gateway.load).toHaveBeenCalledTimes(2)
     second.resolve(translated)
