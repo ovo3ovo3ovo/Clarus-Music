@@ -1,4 +1,4 @@
-import { Howl } from 'howler'
+import { Howl, Howler } from 'howler'
 import type {
   AudioEngine,
   AudioEngineEventMap,
@@ -18,6 +18,14 @@ type HowlerHtml5Sound = {
 type HowlWithHtml5Sounds = Howl & {
   readonly _sounds?: readonly HowlerHtml5Sound[]
 }
+
+// Every source created by this adapter uses HTMLMediaElement playback. Howler
+// otherwise initializes a global Web Audio context before it reads `html5` on
+// each Howl, leaving an unused render graph and unlock listeners resident for
+// the lifetime of the app. Keep the switch local to this adapter so a future
+// Web Audio engine can opt in explicitly instead of inheriting the global
+// default.
+Howler.usingWebAudio = false
 
 function abortError(reason?: unknown): DOMException {
   return new DOMException(String(reason ?? 'Audio load aborted'), 'AbortError')

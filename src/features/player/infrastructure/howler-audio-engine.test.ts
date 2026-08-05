@@ -5,9 +5,11 @@ const mocks = vi.hoisted(() => ({
     options: Record<string, unknown>
     unload: ReturnType<typeof vi.fn>
   }>,
+  howler: { usingWebAudio: true },
 }))
 
 vi.mock('howler', () => ({
+  Howler: mocks.howler,
   Howl: class {
     readonly options: Record<string, unknown>
     readonly unload = vi.fn()
@@ -69,6 +71,10 @@ vi.mock('howler', () => ({
 import { HowlerAudioEngine, audioFormatForSource } from './howler-audio-engine'
 
 describe('Howler source format selection', () => {
+  it('disables the unused global Web Audio graph for HTML5 playback', () => {
+    expect(mocks.howler.usingWebAudio).toBe(false)
+  })
+
   it.each([
     ['audio/flac', 'flac'],
     ['audio/mp4', 'm4a'],
