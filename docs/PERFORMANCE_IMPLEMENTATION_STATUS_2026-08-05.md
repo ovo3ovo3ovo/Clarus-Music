@@ -1,6 +1,6 @@
 # 性能报告实施状态
 
-本文是 `/Users/oo/Clarus Music/docs/TECHNICAL_PERFORMANCE_AUDIT_2026-08-04.md` 的实施交接记录，不替代原始审计报告。记录只包含当前独立 worktree `codex/performance-phase-1` 已落地或明确暂缓的内容。
+本文是 `/Users/oo/Clarus Music/docs/TECHNICAL_PERFORMANCE_AUDIT_2026-08-04.md` 的实施交接记录，不替代原始审计报告。记录只包含当前主分支已落地或明确暂缓的内容。
 
 ## 已完成并验证
 
@@ -10,7 +10,7 @@
 | Task 3 | `AppShell` 用 `v-if` 卸载 LyricsOverlay；scroll anchor 提升到 store；关闭时取消请求/计时器/帧订阅 | `AppShell.vue`、`lyrics-store.ts`、`LyricsOverlay.vue`；`24a741c`、`280c0ca`、`098d864` |
 | Task 4（部分） | far lyric 行不再长期设置 `will-change`；active/near 行保留原有 opacity/filter 输出 | `LyricsOverlay.vue` CSS；无原生 GPU A/B，不宣称收益 |
 | Task 5 | player progress 与 lyrics 使用共享 scheduler；一帧只读取一次 engine clock；manual focus 使用缓存中心和二分查找 | `playback-frame-scheduler.ts`、`LyricsOverlay.vue`；`eae07c5` 及后续 scheduler lease 修复 |
-| Task 5 follow-up | scheduler 订阅者绑定所属 player clock；相同 clock 每帧只采样一次，不同 player 不再串时钟；释放旧 lease 立即移除其闭包 | `playback-frame-scheduler.ts`、`player-store.ts`、`LyricsOverlay.vue` 测试；当前阶段后续提交 |
+| Task 5 follow-up | scheduler 订阅者绑定所属 player clock；相同 clock 每帧只采样一次，不同 player 不再串时钟；释放旧 lease 立即移除其闭包；Pinia 通过 raw clock object 共享同一函数身份 | `playback-frame-scheduler.ts`、`player-store.ts`、`LyricsOverlay.vue`、player-store clock identity test |
 | Task 6 | Rust access timestamp 内存合并写，按命中数/时间窗口刷 index；写失败不让 resident index 超前 | `audio_cache.rs` 测试；`6a49bf9` |
 | Task 7 | queue structure 与 playback state 分离持久化；marker、旧格式迁移、回滚 generation、legacy shadow 与 fingerprint | `queue-snapshot.ts` 测试；`185e663`、`a254b1e`、`5f4c5b3` |
 | Task 8（LRU 子任务） | route scroll store 固定 256 条并刷新最近访问顺序；加入 1,000 fullPath 压力契约 | `route-scroll.ts`、`route-scroll.test.ts` |
@@ -35,7 +35,7 @@
 
 ### 文档同步限制
 
-原始 `docs/PERFORMANCE.md`、`docs/ARCHITECTURE.md`、`docs/FEATURE_PARITY.md` 位于主仓库未提交文件中；本 worktree 不直接覆盖它们。此文件记录当前真实实现，合并到主仓库时应同步修正文档中关于 lyrics visibility、runtime blur 和 Howler AudioContext 的漂移描述。
+原始 `docs/PERFORMANCE.md`、`docs/ARCHITECTURE.md`、`docs/FEATURE_PARITY.md` 位于主仓库未提交/被忽略的用户文档中；本实施提交不覆盖它们。此文件记录当前真实实现；若后续允许修改这些文档，应同步修正文档中关于 lyrics visibility、runtime blur 和 Howler AudioContext 的漂移描述。
 
 ## 当前验证
 

@@ -19,6 +19,7 @@ import {
   type PlayerQueueSnapshot,
 } from '../infrastructure/queue-snapshot'
 import { createPlayerStore } from './player-store'
+import { playbackFrameScheduler } from './playback-frame-scheduler'
 
 const settingsMock = vi.hoisted(() => ({
   settings: {
@@ -486,5 +487,23 @@ describe('player queue navigation', () => {
         progress: 12,
       }),
     )
+  })
+
+  it('uses one stable playback clock for the scheduler lease and progress subscription', () => {
+    const setClock = vi.spyOn(playbackFrameScheduler, 'setClock')
+    const subscribe = vi.spyOn(playbackFrameScheduler, 'subscribe')
+    const { engine, player } = setup()
+
+    engine.emit('state', 'playing')
+
+    const leaseClock = setClock.mock.calls.at(-1)?.[0]
+    const subscriptionClock = subscribe.mock.calls.at(-1)?.[1]
+    expect(leaseClock).toBeDefined()
+    expect(subscriptionClock).toBe(leaseClock)
+    expect(subscriptionClock).toBe(player.playbackClock.read)
+
+    player.dispose()
+    setClock.mockRestore()
+    subscribe.mockRestore()
   })
 })

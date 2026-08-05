@@ -231,8 +231,8 @@ export function createPlayerStore(
         error.value = asError(reason)
       })
     engine.setVolume(volume.value)
-    const playbackClock = () => engine.currentTime
-    const releasePlaybackClock = playbackFrameScheduler.setClock(playbackClock)
+    const playbackClock = markRaw({ read: () => engine.currentTime })
+    const releasePlaybackClock = playbackFrameScheduler.setClock(playbackClock.read)
 
     const stopProgressClock = () => {
       stopProgressSubscription?.()
@@ -246,7 +246,7 @@ export function createPlayerStore(
     const syncProgressClock = () => {
       stopProgressClock()
       if (playing.value && !document.hidden) {
-        stopProgressSubscription = playbackFrameScheduler.subscribe(tickProgress, playbackClock)
+        stopProgressSubscription = playbackFrameScheduler.subscribe(tickProgress, playbackClock.read)
       } else {
         playbackFrameScheduler.wake()
       }
@@ -617,7 +617,7 @@ export function createPlayerStore(
     }
 
     function readPlaybackTime(): number {
-      return engine.currentTime
+      return playbackClock.read()
     }
 
     function setVolume(value: number): void {
@@ -808,6 +808,7 @@ export function createPlayerStore(
       seek,
       readCurrentTime,
       readPlaybackTime,
+      playbackClock,
       setVolume,
       toggleLike,
       syncLikeState,

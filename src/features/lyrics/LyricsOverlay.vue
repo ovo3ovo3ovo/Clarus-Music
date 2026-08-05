@@ -925,8 +925,8 @@ function ensureLyricClock(): void {
     return
   }
   const playbackClock =
-    typeof player.readPlaybackTime === 'function'
-      ? player.readPlaybackTime
+    typeof player.playbackClock?.read === 'function'
+      ? player.playbackClock.read
       : typeof player.readCurrentTime === 'function'
         ? player.readCurrentTime
         : null
