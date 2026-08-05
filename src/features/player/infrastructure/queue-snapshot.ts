@@ -31,6 +31,7 @@ export interface PlayerQueuePersistence {
 const SPLIT_STORAGE_VERSION = 1
 const SPLIT_QUEUE_SUFFIX = '.queue'
 const SPLIT_STATE_SUFFIX = '.state'
+const SPLIT_MARKER_SUFFIX = '.meta'
 
 interface QueueStructureRecord {
   readonly storageVersion: 1
@@ -199,11 +200,13 @@ export function createLocalPlayerQueuePersistence(
 ): PlayerQueuePersistence {
   const queueKey = `${key}${SPLIT_QUEUE_SUFFIX}`
   const stateKey = `${key}${SPLIT_STATE_SUFFIX}`
+  const markerKey = `${key}${SPLIT_MARKER_SUFFIX}`
   const versionedKey = (base: string, revision: number): string => `${base}.${revision}`
   let queueRevision = 0
   let stateRevision = 0
   let obsoleteQueueRevision = 0
   let obsoleteStateRevision = 0
+  let legacyNeedsWrite = false
   let lastStructure:
     | {
         readonly queue: readonly Track[]
@@ -215,7 +218,7 @@ export function createLocalPlayerQueuePersistence(
 
   const clearStoredRecords = (propagateErrors = false): void => {
     let firstError: unknown = null
-    const storageKeys = new Set([key, queueKey, stateKey])
+    const storageKeys = new Set([key, markerKey, queueKey, stateKey])
     for (const revision of [queueRevision, obsoleteQueueRevision]) {
       if (revision > 0) storageKeys.add(versionedKey(queueKey, revision))
     }
@@ -234,6 +237,7 @@ export function createLocalPlayerQueuePersistence(
     stateRevision = 0
     obsoleteQueueRevision = 0
     obsoleteStateRevision = 0
+    legacyNeedsWrite = false
     lastStructure = undefined
     if (propagateErrors && firstError !== null) throw firstError
   }
@@ -300,9 +304,31 @@ export function createLocalPlayerQueuePersistence(
   return {
     load() {
       try {
-        const raw = storage.getItem(key)
-        if (raw === null) return null
-        const parsed = JSON.parse(raw) as UnknownRecord
+        const markerRaw = storage.getItem(markerKey)
+        const legacyRaw = storage.getItem(key)
+        if (markerRaw === null && legacyRaw === null) return null
+        const parseRecord = (raw: string | null): UnknownRecord | null => {
+          if (raw === null) return null
+          try {
+            const value = JSON.parse(raw)
+            return isRecord(value) ? value : null
+          } catch {
+            return null
+          }
+        }
+        const markerRecord = parseRecord(markerRaw)
+        const legacyRecord = parseRecord(legacyRaw)
+        const markerIsVersioned =
+          markerRecord?.storageVersion === SPLIT_STORAGE_VERSION && markerRecord.storage === 'split'
+        const parsed = markerIsVersioned ? markerRecord : legacyRecord
+        if (parsed === null) {
+          clearStoredRecords()
+          return null
+        }
+        const markerAtLegacyKey =
+          !markerIsVersioned &&
+          parsed.storageVersion === SPLIT_STORAGE_VERSION &&
+          parsed.storage === 'split'
         const parsedRevision = positiveInteger(parsed.revision) ? parsed.revision : null
         const parsedQueueRevision = positiveInteger(parsed.queueRevision)
           ? parsed.queueRevision
@@ -316,6 +342,7 @@ export function createLocalPlayerQueuePersistence(
           isSplit && parsedQueueRevision !== null && parsedStateRevision !== null
         let snapshot: PlayerQueueSnapshot | null
         let recoveredPreviousGeneration = false
+        let recoveredLegacySnapshot = false
         if (usesVersionedRecords) {
           queueRevision = parsedQueueRevision
           stateRevision = parsedStateRevision
@@ -379,8 +406,28 @@ export function createLocalPlayerQueuePersistence(
         } else {
           snapshot = parsePlayerQueueSnapshot(parsed)
         }
+        if (snapshot === null && usesVersionedRecords) {
+          const legacySnapshot = parsePlayerQueueSnapshot(legacyRecord)
+          if (legacySnapshot !== null) {
+            snapshot = legacySnapshot
+            queueRevision = 0
+            stateRevision = 0
+            obsoleteQueueRevision = 0
+            obsoleteStateRevision = 0
+            recoveredLegacySnapshot = true
+          }
+        }
         if (snapshot === null) {
           clearStoredRecords()
+        } else if (recoveredLegacySnapshot) {
+          // The durable combined shadow is a valid rollback record. Drop the
+          // unusable marker so the next load can continue from that record.
+          try {
+            storage.removeItem(markerKey)
+          } catch {
+            // Best effort; the fallback remains available for this process.
+          }
+          lastStructure = undefined
         } else if (usesVersionedRecords && recoveredPreviousGeneration) {
           // Keep the previous complete records in place. The next successful
           // save publishes a fresh marker and can then retire the incomplete
@@ -427,6 +474,36 @@ export function createLocalPlayerQueuePersistence(
           obsoleteStateRevision = 0
           lastStructure = undefined
         }
+
+        if (
+          !recoveredLegacySnapshot &&
+          (usesVersionedRecords || (isSplit && parsedRevision !== null))
+        ) {
+          const legacySnapshot = parsePlayerQueueSnapshot(legacyRecord)
+          legacyNeedsWrite = legacySnapshot === null || markerAtLegacyKey
+          if (legacyNeedsWrite) {
+            try {
+              storage.setItem(key, JSON.stringify(snapshot))
+              if (usesVersionedRecords) {
+                storage.setItem(
+                  markerKey,
+                  JSON.stringify({
+                    storageVersion: SPLIT_STORAGE_VERSION,
+                    storage: 'split',
+                    queueRevision,
+                    stateRevision,
+                    previousQueueRevision: null,
+                    previousStateRevision: null,
+                  }),
+                )
+              }
+              legacyNeedsWrite = false
+            } catch {
+              // A read must still return a valid in-memory snapshot when the
+              // compatibility shadow cannot be persisted.
+            }
+          }
+        }
         return snapshot
       } catch {
         clearStoredRecords()
@@ -448,6 +525,7 @@ export function createLocalPlayerQueuePersistence(
       const staleStateRevision = stateRevision
       const storageKeys = new Set([
         key,
+        markerKey,
         queueKey,
         stateKey,
         versionedKey(queueKey, nextQueueRevision),
@@ -462,6 +540,7 @@ export function createLocalPlayerQueuePersistence(
       const previousStateRevision = stateRevision
       const previousObsoleteQueueRevision = obsoleteQueueRevision
       const previousObsoleteStateRevision = obsoleteStateRevision
+      const previousLegacyNeedsWrite = legacyNeedsWrite
       const previousStructure = lastStructure
       try {
         if (structureChanged) {
@@ -489,8 +568,11 @@ export function createLocalPlayerQueuePersistence(
           progress: snapshot.progress,
         }
         storage.setItem(versionedKey(stateKey, nextStateRevision), JSON.stringify(stateRecord))
+        if (structureChanged || legacyNeedsWrite) {
+          storage.setItem(key, JSON.stringify(snapshot))
+        }
         storage.setItem(
-          key,
+          markerKey,
           JSON.stringify({
             storageVersion: SPLIT_STORAGE_VERSION,
             storage: 'split',
@@ -500,6 +582,7 @@ export function createLocalPlayerQueuePersistence(
             previousStateRevision: staleStateRevision > 0 ? staleStateRevision : null,
           }),
         )
+        legacyNeedsWrite = false
         queueRevision = nextQueueRevision
         stateRevision = nextStateRevision
         obsoleteQueueRevision = staleQueueRevision
@@ -516,6 +599,7 @@ export function createLocalPlayerQueuePersistence(
         stateRevision = previousStateRevision
         obsoleteQueueRevision = previousObsoleteQueueRevision
         obsoleteStateRevision = previousObsoleteStateRevision
+        legacyNeedsWrite = previousLegacyNeedsWrite
         lastStructure = previousStructure
         for (const [storageKey, value] of previousValues) {
           try {

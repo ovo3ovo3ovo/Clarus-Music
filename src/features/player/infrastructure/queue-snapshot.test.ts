@@ -99,6 +99,23 @@ describe('player queue snapshots', () => {
     expect(persistence.load()).toEqual({ ...initial, volume: 0.2, progress: 12 })
   })
 
+  it('keeps a legacy combined snapshot for older app rollback without rewriting it on state-only saves', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const persistence = createLocalPlayerQueuePersistence(storage, 'queue')
+    const initial = snapshot()
+    persistence.save(initial)
+    persistence.save({ ...initial, volume: 0.2, progress: 12 })
+
+    expect(JSON.parse(values.get('queue') ?? 'null')).toEqual(initial)
+    expect(values.has('queue.meta')).toBe(true)
+    expect(persistence.load()).toEqual({ ...initial, volume: 0.2, progress: 12 })
+  })
+
   it('rehydrates split bookkeeping after a reload', () => {
     const values = new Map<string, string>()
     const storage = {
@@ -168,7 +185,7 @@ describe('player queue snapshots', () => {
     // corrupted. The previous generation is still a complete snapshot and
     // must be preferred over clearing all persisted playback state.
     values.set(
-      'queue',
+      'queue.meta',
       JSON.stringify({
         storageVersion: 1,
         storage: 'split',
@@ -181,9 +198,36 @@ describe('player queue snapshots', () => {
 
     const restored = createLocalPlayerQueuePersistence(storage, 'queue').load()
     expect(restored).toEqual(initial)
-    expect(values.has('queue')).toBe(true)
+    expect(values.has('queue.meta')).toBe(true)
     expect(values.has('queue.queue.1')).toBe(true)
     expect(values.has('queue.state.1')).toBe(true)
+  })
+
+  it('falls back to the legacy shadow when a marker has no usable generation', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+    }
+    const initial = snapshot()
+    createLocalPlayerQueuePersistence(storage, 'queue').save(initial)
+    values.set(
+      'queue.meta',
+      JSON.stringify({
+        storageVersion: 1,
+        storage: 'split',
+        queueRevision: 99,
+        stateRevision: 99,
+        previousQueueRevision: null,
+        previousStateRevision: null,
+      }),
+    )
+
+    const restored = createLocalPlayerQueuePersistence(storage, 'queue').load()
+    expect(restored).toEqual(initial)
+    expect(values.has('queue')).toBe(true)
+    expect(values.has('queue.meta')).toBe(false)
   })
 
   it('keeps the previous split snapshot when a later storage write fails', () => {
