@@ -37,6 +37,8 @@ const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MAX_SOURCE_URL_BYTES: usize = 4_096;
 const DEFAULT_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_CONCURRENT_DOWNLOADS: usize = 3;
+const ACCESS_FLUSH_HITS: usize = 32;
+const ACCESS_FLUSH_INTERVAL_MS: u64 = 30_000;
 
 #[derive(Clone)]
 pub struct AudioCacheState {
@@ -240,6 +242,8 @@ struct LoadedIndex {
 struct ResidentIndex {
     root: PathBuf,
     index: CacheIndex,
+    access_updates: usize,
+    access_flush_ms: u64,
 }
 
 #[derive(Debug)]
@@ -543,20 +547,27 @@ async fn write_index(root: &Path, index: &CacheIndex) -> Result<(), CacheFailure
     .map_err(|error| CacheFailure::task_failed(format!("Index writer failed: {error}")))?
 }
 
-async fn persist_entry_access(
+async fn record_entry_access(
     root: &Path,
-    index: &mut CacheIndex,
+    resident: &mut ResidentIndex,
     key: &str,
     accessed_ms: u64,
 ) -> Result<(), CacheFailure> {
-    let mut next = index.clone();
-    let entry = next
+    let entry = resident
+        .index
         .entries
         .get_mut(key)
         .ok_or_else(|| CacheFailure::corruption("The cached audio entry disappeared"))?;
     entry.last_accessed_ms = accessed_ms;
-    write_index(root, &next).await?;
-    *index = next;
+    resident.access_updates = resident.access_updates.saturating_add(1);
+    if resident.access_updates < ACCESS_FLUSH_HITS
+        && accessed_ms.saturating_sub(resident.access_flush_ms) < ACCESS_FLUSH_INTERVAL_MS
+    {
+        return Ok(());
+    }
+    write_index(root, &resident.index).await?;
+    resident.access_updates = 0;
+    resident.access_flush_ms = accessed_ms;
     Ok(())
 }
 
@@ -667,6 +678,9 @@ async fn ensure_resident_index(
     if resident.as_ref().is_some_and(|loaded| loaded.root == root) {
         return Ok(());
     }
+    if let Some(previous) = resident.as_ref().filter(|loaded| loaded.access_updates > 0) {
+        write_index(&previous.root, &previous.index).await?;
+    }
     let loaded = read_index(root).await?;
     cleanup_orphaned_files(root, &loaded.index, inner).await?;
     if loaded.dirty {
@@ -675,6 +689,8 @@ async fn ensure_resident_index(
     *resident = Some(ResidentIndex {
         root: root.to_path_buf(),
         index: loaded.index,
+        access_updates: 0,
+        access_flush_ms: now_ms(),
     });
     Ok(())
 }
@@ -865,11 +881,13 @@ async fn commit_download(
     }
     let mut resident = inner.resident_index.lock().await;
     ensure_resident_index(root, inner, &mut resident).await?;
-    let index = &mut resident
-        .as_mut()
-        .expect("resident index is initialized")
-        .index;
-    trim_resident_index(root, inner, index, spec.cache_limit_bytes).await?;
+    let resident_index = resident.as_mut().expect("resident index is initialized");
+    let index = &mut resident_index.index;
+    let trimmed = trim_resident_index(root, inner, index, spec.cache_limit_bytes).await?;
+    if trimmed.0 > 0 {
+        resident_index.access_updates = 0;
+        resident_index.access_flush_ms = now_ms();
+    }
     let key = cache_key(spec.track_id, &spec.quality);
     let pinned = leased_keys(inner).await;
     if pinned.contains(&key) {
@@ -966,6 +984,8 @@ async fn commit_download(
         return Err(error);
     }
     *index = next_index;
+    resident_index.access_updates = 0;
+    resident_index.access_flush_ms = now_ms();
     for victim in victims {
         let _ = remove_entry_file(root, &victim).await;
     }
@@ -997,32 +1017,39 @@ pub async fn lookup_audio_cache(
     let _operation = inner.operation_lock.lock().await;
     let mut resident = inner.resident_index.lock().await;
     ensure_resident_index(&root, &inner, &mut resident).await?;
-    let index = &mut resident
-        .as_mut()
-        .expect("resident index is initialized")
-        .index;
-    trim_resident_index(
+    let resident_index = resident.as_mut().expect("resident index is initialized");
+    let trimmed = trim_resident_index(
         &root,
         &inner,
-        index,
+        &mut resident_index.index,
         inner.cache_limit_bytes.load(Ordering::Acquire),
     )
     .await?;
+    if trimmed.0 > 0 {
+        resident_index.access_updates = 0;
+        resident_index.access_flush_ms = now_ms();
+        resident_index.access_flush_ms = now_ms();
+    }
     let key = cache_key(track_id, &quality);
-    let Some(entry) = index.entries.get(&key) else {
+    let Some(entry) = resident_index.index.entries.get(&key) else {
         return Ok(None);
     };
-    let file_path = root.join(&entry.file_name);
+    let file_name = entry.file_name.clone();
+    let mime_type = entry.mime_type.clone();
+    let size_bytes = entry.size_bytes;
+    let file_path = root.join(&file_name);
     let valid_file = match fs::metadata(&file_path).await {
-        Ok(metadata) => metadata.is_file() && metadata.len() == entry.size_bytes,
+        Ok(metadata) => metadata.is_file() && metadata.len() == size_bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => false,
         Err(error) => return Err(CacheFailure::io("inspect", error)),
     };
     if !valid_file {
-        let mut next = index.clone();
+        let mut next = resident_index.index.clone();
         next.entries.remove(&key);
         write_index(&root, &next).await?;
-        *index = next;
+        resident_index.index = next;
+        resident_index.access_updates = 0;
+        resident_index.access_flush_ms = now_ms();
         let _ = fs::remove_file(&file_path).await;
         return Ok(None);
     }
@@ -1030,10 +1057,7 @@ pub async fn lookup_audio_cache(
         .to_str()
         .ok_or_else(|| CacheFailure::corruption("The cached audio path is not valid UTF-8"))?
         .to_string();
-    let mime_type = entry.mime_type.clone();
-    let file_name = entry.file_name.clone();
-    let size_bytes = entry.size_bytes;
-    persist_entry_access(&root, index, &key, now_ms()).await?;
+    record_entry_access(&root, resident_index, &key, now_ms()).await?;
     let lease_id = register_lease(&inner, key, file_name).await?;
     Ok(Some(CachedAudioSource {
         file_path,
@@ -1209,12 +1233,13 @@ pub async fn audio_cache_stats(
     let _operation = inner.operation_lock.lock().await;
     let mut resident = inner.resident_index.lock().await;
     ensure_resident_index(&root, &inner, &mut resident).await?;
-    let index = &mut resident
-        .as_mut()
-        .expect("resident index is initialized")
-        .index;
+    let resident_index = resident.as_mut().expect("resident index is initialized");
+    let index = &mut resident_index.index;
     let limit_bytes = inner.cache_limit_bytes.load(Ordering::Acquire);
-    trim_resident_index(&root, &inner, index, limit_bytes).await?;
+    let trimmed = trim_resident_index(&root, &inner, index, limit_bytes).await?;
+    if trimmed.0 > 0 {
+        resident_index.access_updates = 0;
+    }
     let leased_entries = leased_keys(&inner).await.len() as u64;
     let in_flight_downloads = inner
         .in_flight
@@ -1244,10 +1269,8 @@ pub async fn clear_audio_cache(
     let _operation = inner.operation_lock.lock().await;
     let mut resident = inner.resident_index.lock().await;
     ensure_resident_index(&root, &inner, &mut resident).await?;
-    let index = &mut resident
-        .as_mut()
-        .expect("resident index is initialized")
-        .index;
+    let resident_index = resident.as_mut().expect("resident index is initialized");
+    let index = &mut resident_index.index;
     let pinned = leased_keys(&inner).await;
     let mut next = index.clone();
     let entries = std::mem::take(&mut next.entries);
@@ -1265,6 +1288,8 @@ pub async fn clear_audio_cache(
     }
     write_index(&root, &next).await?;
     *index = next;
+    resident_index.access_updates = 0;
+    resident_index.access_flush_ms = now_ms();
     for victim in victims {
         let _ = remove_entry_file(&root, &victim).await;
     }
@@ -1286,10 +1311,10 @@ mod tests {
 
     use super::{
         begin_in_flight, cache_key, cleanup_orphaned_files, commit_download, download_stream,
-        managed_audio_file_name, normalize_mime_type, persist_entry_access, read_index,
+        managed_audio_file_name, normalize_mime_type, read_index, record_entry_access,
         register_lease, release_lease, safe_entry_file_name, trim_resident_index, validate_quality,
         write_index, AudioCacheState, CacheEntry, CacheIndex, ResidentIndex, TemporaryReservation,
-        MAX_CONCURRENT_DOWNLOADS, MAX_LEASES, MAX_TOTAL_BYTES, MAX_TRACK_BYTES,
+        ACCESS_FLUSH_HITS, MAX_CONCURRENT_DOWNLOADS, MAX_LEASES, MAX_TOTAL_BYTES, MAX_TRACK_BYTES,
     };
 
     fn entry(track_id: i64, quality: &str, file_name: &str, size_bytes: u64) -> CacheEntry {
@@ -1571,13 +1596,35 @@ mod tests {
             .await
             .expect("initial index");
 
-        persist_entry_access(directory.path(), &mut index, &key, 99)
+        let mut resident = ResidentIndex {
+            root: directory.path().to_path_buf(),
+            index,
+            access_updates: 0,
+            access_flush_ms: super::now_ms(),
+        };
+        record_entry_access(directory.path(), &mut resident, &key, 99)
             .await
-            .expect("persist access");
+            .expect("record access");
+        assert_eq!(
+            read_index(directory.path())
+                .await
+                .expect("read deferred index")
+                .index
+                .entries[&key]
+                .last_accessed_ms,
+            1,
+            "a single cache hit should not rewrite the full index"
+        );
+        for access in 0..(ACCESS_FLUSH_HITS - 1) {
+            record_entry_access(directory.path(), &mut resident, &key, 100 + access as u64)
+                .await
+                .expect("flush access batch");
+        }
 
         let reloaded = read_index(directory.path()).await.expect("reload index");
         assert_eq!(
-            reloaded.index.entries[&key].last_accessed_ms, 99,
+            reloaded.index.entries[&key].last_accessed_ms,
+            100 + (ACCESS_FLUSH_HITS - 2) as u64,
             "LRU order must survive an application restart"
         );
     }
@@ -1688,6 +1735,8 @@ mod tests {
         *state.inner.resident_index.lock().await = Some(ResidentIndex {
             root: directory.path().to_path_buf(),
             index,
+            access_updates: 0,
+            access_flush_ms: super::now_ms(),
         });
         std::fs::create_dir(directory.path().join("index.json")).expect("blocking index path");
         let chunks = stream::iter([Ok::<_, &'static str>(Bytes::from_static(b"new!"))]);
