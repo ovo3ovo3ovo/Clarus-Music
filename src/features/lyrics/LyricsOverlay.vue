@@ -82,26 +82,11 @@
           </div>
         </div>
 
-        <div class="progress-row">
-          <input
-            type="range"
-            min="0"
-            :max="Math.max(trackDuration, 1)"
-            step="1"
-            :value="displayProgress"
-            :style="rangeStyle(displayProgress, trackDuration)"
-            :aria-label="t('lyrics.progress')"
-            @input="previewSeek"
-            @change="commitSeek"
-            @pointerup="commitSeek"
-            @click="commitSeek"
-            @blur="commitSeek"
-          />
-          <div class="progress-times" aria-hidden="true">
-            <span>{{ formatPlaybackTime(displayProgress) }}</span>
-            <span>{{ formatPlaybackTime(trackDuration) }}</span>
-          </div>
-        </div>
+        <LyricsProgressControl
+          :key="track?.id ?? 'empty'"
+          :duration="trackDuration"
+          :transitioning="isTransitioning"
+        />
 
         <div class="media-controls">
           <IconButton
@@ -233,6 +218,7 @@ import { useI18n } from 'vue-i18n'
 import CoverImage from '@/components/common/CoverImage.vue'
 import AppIcon from '@/components/common/AppIcon.vue'
 import IconButton from '@/components/common/IconButton.vue'
+import LyricsProgressControl from './presentation/LyricsProgressControl.vue'
 import { usePlayerStore } from '@/features/player/application/player-store'
 import { playbackFrameScheduler } from '@/features/player/application/playback-frame-scheduler'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
@@ -259,7 +245,6 @@ const settingsStore = useSettingsStore()
 const lyricsStore = useLyricsStore()
 const background = ref('')
 const copyFeedback = ref('')
-const scrubProgress = ref<number | null>(null)
 const lyricMenuElement = ref<globalThis.HTMLElement | null>(null)
 const lyricMenu = ref<{
   readonly line: LyricLine
@@ -270,7 +255,7 @@ const lyricMenu = ref<{
 let backgroundController: AbortController | null = null
 let copyTimer: number | null = null
 let stopLyricSubscription: (() => void) | null = null
-let seekCommitFrame: number | null = null
+let stopPausedProgressWatch: (() => void) | null = null
 
 // Keep the lyric surface in step with the player bar: the selected target is
 // presented immediately while its stream and lyrics resolve in parallel.
@@ -289,9 +274,6 @@ const trackDuration = computed(() => {
   const seconds = Math.floor((track.value?.durationMs ?? 0) / 1_000)
   return seconds > 1 ? seconds - 1 : seconds
 })
-const displayProgress = computed(
-  () => scrubProgress.value ?? (isTransitioning.value ? 0 : player.progress),
-)
 const activeIndex = ref(-1)
 const lyricsContainer = ref<globalThis.HTMLElement | null>(null)
 const isUserScrolling = ref(false)
@@ -360,12 +342,6 @@ function resizedCover(url: string, size: number): string {
     minWidth: size,
     pixelRatio: 1,
   })
-}
-
-function formatPlaybackTime(value: number): string {
-  const seconds = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
-  const minutes = Math.floor(seconds / 60)
-  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
 }
 
 function lyricStateClass(index: number): string {
@@ -666,29 +642,6 @@ function rangeStyle(value: number, maximum: number): Record<string, string> {
   return { '--range-progress': `${percentage}%` }
 }
 
-function inputProgress(event: Event): number {
-  const value = Number((event.target as HTMLInputElement).value)
-  return Number.isFinite(value)
-    ? Math.min(Math.max(value, 0), trackDuration.value)
-    : player.progress
-}
-
-function previewSeek(event: Event): void {
-  scrubProgress.value = inputProgress(event)
-}
-
-function commitSeek(event: Event): void {
-  if (scrubProgress.value === null && event.type === 'blur') return
-  const progress = inputProgress(event)
-  scrubProgress.value = null
-  if (seekCommitFrame !== null) return
-  player.seek(progress)
-  if (player.enabled && !player.playing) void player.togglePlayback()
-  seekCommitFrame = window.requestAnimationFrame(() => {
-    seekCommitFrame = null
-  })
-}
-
 function changeVolume(event: Event): void {
   player.setVolume(Number((event.target as HTMLInputElement).value))
 }
@@ -851,7 +804,6 @@ function syncLyricIndex(currentTimeMs = currentLyricTimeMs(), followActiveLine =
 watch(
   () => player.pendingTrack?.id ?? player.currentTrack?.id ?? null,
   () => {
-    scrubProgress.value = null
     activeIndex.value = -1
     scrollTarget = null
     scrollTargetIndex = -1
@@ -930,12 +882,9 @@ function ensureLyricClock(): void {
       : typeof player.readCurrentTime === 'function'
         ? player.readCurrentTime
         : null
-  stopLyricSubscription = playbackFrameScheduler.subscribe(
-    ({ timestamp, currentTime }) => {
-      tickLyricClock(timestamp, currentTime)
-    },
-    playbackClock,
-  )
+  stopLyricSubscription = playbackFrameScheduler.subscribe(({ timestamp, currentTime }) => {
+    tickLyricClock(timestamp, currentTime)
+  }, playbackClock)
 }
 
 function tickLyricClock(timestamp: number, currentTimeSeconds = Number.NaN): void {
@@ -964,6 +913,20 @@ function syncLyricClock(visible: boolean): void {
   ensureLyricClock()
 }
 
+function syncPausedProgressObservation(): void {
+  stopPausedProgressWatch?.()
+  stopPausedProgressWatch = null
+  if (!lyricsStore.visible || player.playing) return
+  // The playback scheduler already drives lyrics during playback. Keeping a
+  // second reactive watcher on `progress` in that state needlessly schedules
+  // Vue work on every display frame; only paused seeks need this observation.
+  syncLyricIndex()
+  stopPausedProgressWatch = watch(
+    () => player.progress,
+    () => syncLyricIndex(),
+  )
+}
+
 function handleVisibilityChange(): void {
   syncLyricClock(lyricsStore.visible)
 }
@@ -977,12 +940,9 @@ watch(
   },
 )
 
-watch(
-  () => player.progress,
-  () => {
-    if (lyricsStore.visible && !player.playing) syncLyricIndex()
-  },
-)
+watch([() => lyricsStore.visible, () => player.playing], syncPausedProgressObservation, {
+  immediate: true,
+})
 
 function handleMotionPreferenceChange(event: globalThis.MediaQueryListEvent): void {
   reducedMotion.value = event.matches
@@ -1046,7 +1006,8 @@ onUnmounted(() => {
   if (scrollResumeTimer !== null) window.clearTimeout(scrollResumeTimer)
   if (targetMeasureFrame !== null) window.cancelAnimationFrame(targetMeasureFrame)
   if (manualFocusFrame !== null) window.cancelAnimationFrame(manualFocusFrame)
-  if (seekCommitFrame !== null) window.cancelAnimationFrame(seekCommitFrame)
+  stopPausedProgressWatch?.()
+  stopPausedProgressWatch = null
   stopLyricClock()
   resizeObserver?.disconnect()
   resizeObserver = null
@@ -1257,29 +1218,6 @@ onUnmounted(() => {
     min-width: 0;
     flex: 1 1 auto;
   }
-}
-
-.progress-row {
-  --range-track-color: color-mix(in srgb, var(--color-text) 24%, transparent);
-
-  display: grid;
-  gap: 6px;
-  margin-top: 22px;
-  align-items: stretch;
-
-  input {
-    width: 100%;
-  }
-}
-
-.progress-times {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: var(--color-text-secondary);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.82;
 }
 
 .media-controls {

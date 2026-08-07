@@ -1,8 +1,15 @@
 <template>
-  <div ref="listRoot" class="virtual-track-list" role="list" :style="listStyle">
+  <div
+    ref="listRoot"
+    class="virtual-track-list"
+    :class="{ 'is-virtualized': isVirtualized }"
+    role="list"
+    :style="listStyle"
+  >
     <article
-      v-for="row in virtualRows"
+      v-for="row in visibleRows"
       :key="String(row.key)"
+      v-memo="rowMemo(row)"
       class="track-row"
       :class="{
         playing: tracks[row.index]?.id === activeTrackId,
@@ -126,6 +133,7 @@ import {
   nextTick,
   onActivated,
   onBeforeUnmount,
+  onDeactivated,
   onMounted,
   ref,
   shallowRef,
@@ -154,11 +162,13 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ play: [track: Track, index: number]; remove: [index: number] }>()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 type DomElement = NonNullable<ReturnType<typeof document.querySelector>>
+type TrackListRow = Pick<VirtualItem, 'key' | 'index' | 'start'>
 const listRoot = ref<DomElement | null>(null)
 const scrollElement = shallowRef<DomElement | null>(null)
 const scrollMargin = ref(0)
+const virtualizerActive = ref(true)
 const contextTrack = shallowRef<Track | null>(null)
 const contextIndex = ref(-1)
 const contextPosition = shallowRef<{ x: number; y: number } | null>(null)
@@ -167,6 +177,13 @@ let resizeObserver: ReturnType<typeof createResizeObserver> | null = null
 // Keep this in lockstep with the fixed row height below. A dense list makes
 // the virtualizer's estimate especially important for stable scroll offsets.
 const TRACK_ROW_HEIGHT = 46
+// Below this point, the browser's native flow layout is cheaper than a
+// virtualizer and, critically, avoids adding another scroll observer to the
+// shared application scroller.  Album discs and the queue commonly contain
+// only a few dozen rows, while search/history cohorts can be much larger.
+const VIRTUALIZE_TRACKS_AT = 96
+
+const isVirtualized = computed(() => props.tracks.length >= VIRTUALIZE_TRACKS_AT)
 
 function resolveScrollElement(): DomElement | null {
   return (
@@ -182,10 +199,12 @@ function subtitle(track: Track): string {
 const virtualizer = useVirtualizer(
   computed(() => ({
     count: props.tracks.length,
+    enabled: isVirtualized.value,
     // The list can mount after its kept-alive route is activated.  WebKit may
     // miss the ref update in that sequence, leaving the virtualizer without an
     // initial viewport and therefore with zero visible rows.
-    getScrollElement: () => scrollElement.value ?? resolveScrollElement(),
+    getScrollElement: () =>
+      virtualizerActive.value ? (scrollElement.value ?? resolveScrollElement()) : null,
     estimateSize: () => TRACK_ROW_HEIGHT,
     getItemKey: (index: number) =>
       props.itemKey === 'index' ? index : (props.tracks[index]?.id ?? index),
@@ -194,12 +213,26 @@ const virtualizer = useVirtualizer(
     scrollMargin: scrollMargin.value,
   })),
 )
-const virtualRows = computed(() => virtualizer.value.getVirtualItems())
+function trackKey(index: number): string | number {
+  return props.itemKey === 'index' ? index : (props.tracks[index]?.id ?? index)
+}
+
+const staticRows = computed<readonly TrackListRow[]>(() =>
+  props.tracks.map((_track, index) => ({
+    key: trackKey(index),
+    index,
+    start: index * TRACK_ROW_HEIGHT,
+  })),
+)
+const visibleRows = computed<readonly TrackListRow[]>(() =>
+  isVirtualized.value ? virtualizer.value.getVirtualItems() : staticRows.value,
+)
 const listStyle = computed<Record<string, string>>(() => ({
-  height: `${virtualizer.value.getTotalSize()}px`,
+  ...(isVirtualized.value ? { height: `${virtualizer.value.getTotalSize()}px` } : {}),
 }))
 
 function updateScrollMargin(): void {
+  if (!isVirtualized.value || !virtualizerActive.value) return
   const root = listRoot.value
   const scroller = scrollElement.value
   if (!root || !scroller) return
@@ -212,16 +245,50 @@ function createResizeObserver(callback: () => void) {
 }
 
 function refreshVirtualizer(): void {
+  if (!isVirtualized.value || !virtualizerActive.value) return
   virtualizer.value._willUpdate()
   updateScrollMargin()
   virtualizer.value.measure()
 }
 
-function rowStyle(row: VirtualItem): Record<string, string> {
+function observeVirtualizerGeometry(): void {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  if (!isVirtualized.value || !virtualizerActive.value) return
+  resizeObserver = createResizeObserver(() => {
+    updateScrollMargin()
+  })
+  if (scrollElement.value) resizeObserver?.observe(scrollElement.value)
+  if (listRoot.value) resizeObserver?.observe(listRoot.value)
+}
+
+function rowStyle(row: TrackListRow): Record<string, string> {
   // Keep virtual positioning composable with the hover scale.  Putting the
   // translate in a custom property prevents a CSS transform from ever
   // replacing the virtualizer's placement.
+  if (!isVirtualized.value) return {}
   return { '--track-row-y': `${row.start - scrollMargin.value}px` }
+}
+
+function rowMemo(row: TrackListRow): unknown[] {
+  const track = props.tracks[row.index]
+  const trackId = track?.id
+  return [
+    isVirtualized.value,
+    row.index,
+    row.start,
+    scrollMargin.value,
+    track,
+    props.itemKey,
+    trackId === activeTrackId.value,
+    trackId === props.busyTrackId,
+    trackId === props.pendingTrackId,
+    props.playCounts?.[trackId ?? -1] ?? null,
+    props.removable,
+    props.removeTitle,
+    props.showExplicitAfterTitle,
+    locale.value,
+  ]
 }
 
 function formatDuration(durationMs: number): string {
@@ -263,17 +330,24 @@ onMounted(async () => {
   await nextTick()
   scrollElement.value = resolveScrollElement()
   refreshVirtualizer()
-  resizeObserver = createResizeObserver(() => {
-    updateScrollMargin()
-  })
-  if (scrollElement.value) resizeObserver?.observe(scrollElement.value)
-  if (listRoot.value) resizeObserver?.observe(listRoot.value)
+  observeVirtualizerGeometry()
 })
 
 onActivated(async () => {
+  virtualizerActive.value = true
   await nextTick()
   scrollElement.value = resolveScrollElement()
   refreshVirtualizer()
+  observeVirtualizerGeometry()
+})
+
+onDeactivated(() => {
+  virtualizerActive.value = false
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  // Keep cached routes from retaining a scroll listener on the shared app
+  // scroller. The active hook rebinds it before the route becomes visible.
+  virtualizer.value._willUpdate()
 })
 
 watch(
@@ -281,6 +355,7 @@ watch(
   async () => {
     await nextTick()
     refreshVirtualizer()
+    observeVirtualizerGeometry()
   },
 )
 
@@ -291,6 +366,11 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
 .virtual-track-list {
   position: relative;
   width: 100%;
+}
+
+/* Large lists retain only the visible rows and isolate their layout work. */
+.virtual-track-list.is-virtualized {
+  contain: layout style;
 }
 
 .track-row {
@@ -309,13 +389,20 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
   align-items: center;
   color: var(--color-text);
   background: transparent;
-  transform: translateY(var(--track-row-y));
-  transform-origin: center;
+  contain: layout style;
+  transform: translate3d(0, var(--track-row-y), 0);
   user-select: none;
   transition:
     color var(--motion-fast) ease,
-    opacity var(--motion-fast) ease,
-    transform var(--motion-hover-emphasis) var(--ease-out);
+    opacity var(--motion-fast) ease;
+
+  /* Short lists stay in normal flow: no transform updates or scroll observer. */
+  .virtual-track-list:not(.is-virtualized) & {
+    position: relative;
+    transform: none;
+    content-visibility: auto;
+    contain-intrinsic-size: 46px;
+  }
 
   &.with-count {
     grid-template-columns: 28px 36px minmax(0, 1fr) minmax(140px, 0.68fr) 60px 46px;
@@ -336,7 +423,6 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
 
   &:focus-within:not(:hover) {
     background: transparent;
-    transform: translateY(var(--track-row-y));
     z-index: 1;
   }
 
@@ -352,6 +438,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
 
 .track-number {
   display: grid;
+  position: relative;
   width: 28px;
   height: 28px;
   place-items: center;
@@ -359,20 +446,27 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
   font-variant-numeric: tabular-nums;
 
   .number {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
     opacity: 0.58;
+    transition: opacity var(--motion-fast) ease;
   }
 }
 
 .play-track {
-  display: none;
-  width: 28px;
-  height: 28px;
+  position: absolute;
+  inset: 0;
+  display: grid;
   padding: 6px;
   border: 0;
   border-radius: var(--radius-sm);
   place-items: center;
   color: var(--color-primary);
   background: transparent;
+  opacity: 0;
+  pointer-events: none;
   transition:
     color var(--motion-fast) ease,
     opacity var(--motion-fast) ease;
@@ -381,7 +475,6 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
     transform-origin: center;
     transition: transform var(--motion-hover-emphasis) var(--ease-out);
     pointer-events: none;
-    will-change: transform;
   }
 
   &:hover:not(:disabled) {
@@ -409,12 +502,14 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
 
 .track-row:hover .track-number .number,
 .track-row:focus-within .track-number .number {
-  display: none;
+  opacity: 0;
 }
 
 .track-row:hover .play-track,
-.track-row:focus-within .play-track {
-  display: grid;
+.track-row:focus-within .play-track,
+.play-track:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .track-cover {
@@ -497,7 +592,6 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
     transform-origin: center;
     transition: transform var(--motion-hover-emphasis) var(--ease-out);
     pointer-events: none;
-    will-change: transform;
   }
 
   &:hover:not(:disabled) {
@@ -608,13 +702,6 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
     &:focus-visible,
     &:active {
       will-change: auto;
-    }
-  }
-
-  .track-row {
-    &:hover,
-    &:focus-within {
-      transform: translateY(var(--track-row-y));
     }
   }
 

@@ -42,7 +42,6 @@ defineProps<{ icon: string; title: string; disabled?: boolean }>()
     transform-origin: center;
     transition: transform var(--motion-hover-emphasis) var(--ease-out);
     pointer-events: none;
-    will-change: transform;
   }
 
   &:hover:not(:disabled) {

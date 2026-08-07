@@ -196,7 +196,6 @@ function mobileMeta(playlist: LibraryPlaylist): string {
     transform-origin: center;
     transition: transform var(--motion-hover-emphasis) var(--ease-out);
     pointer-events: none;
-    will-change: transform;
   }
 
   &:hover:not(:disabled) {

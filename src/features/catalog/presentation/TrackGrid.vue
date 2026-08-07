@@ -3,6 +3,7 @@
     <article
       v-for="(track, index) in tracks"
       :key="track.id"
+      v-memo="rowMemo(track, index)"
       class="track-row"
       :class="{
         playing: track.id === activeTrackId,
@@ -84,7 +85,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   play: [track: Track, index: number]
 }>()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const activeTrackId = computed(() => props.pendingTrackId ?? props.currentTrackId)
 const contextTrack = shallowRef<Track | null>(null)
 const contextIndex = ref(-1)
@@ -92,6 +93,19 @@ const contextPosition = shallowRef<{ x: number; y: number } | null>(null)
 
 function subtitle(track: Track): string {
   return trackSubtitle(track)
+}
+
+// Playback state changes on just one or two rows.  Avoid diffing every card
+// in an overview result when the active/busy row changes.
+function rowMemo(track: Track, index: number): unknown[] {
+  return [
+    track,
+    index,
+    track.id === activeTrackId.value,
+    track.id === props.busyTrackId,
+    track.id === props.pendingTrackId,
+    locale.value,
+  ]
 }
 
 function play(track: Track, index: number): void {
@@ -241,7 +255,6 @@ function playFromContext(track: Track): void {
     transform-origin: center;
     transition: transform var(--motion-hover-emphasis) var(--ease-out);
     pointer-events: none;
-    will-change: transform;
   }
 
   &:hover:not(:disabled) {
