@@ -17,7 +17,8 @@
           <CoverImage
             class="track-cover"
             :source="displayTrack.album.coverUrl"
-            :width="64"
+            :width="48"
+            role="player"
             alt=""
             decoding="async"
           />
@@ -141,7 +142,14 @@
             :disabled="playlistMutationId !== null"
             @click="addCurrentTrackToPlaylist(playlist.id)"
           >
-            <CoverImage :source="playlist.coverUrl" :width="64" alt="" loading="lazy" />
+            <CoverImage
+              :source="playlist.coverUrl"
+              :width="40"
+              role="row"
+              alt=""
+              loading="lazy"
+              viewport-unload
+            />
             <span>{{ playlist.name }}</span>
             <span
               v-if="playlistMutationId === playlist.id"

@@ -99,11 +99,6 @@ describe('browser media session', () => {
       album: 'Neon',
       artwork: [
         {
-          src: 'https://img.test/cover.jpg?param=224y224',
-          sizes: '224x224',
-          type: 'image/jpeg',
-        },
-        {
           src: 'https://img.test/cover.jpg?param=512y512',
           sizes: '512x512',
           type: 'image/jpeg',

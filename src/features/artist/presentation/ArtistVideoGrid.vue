@@ -2,14 +2,15 @@
   <div class="artist-video-grid">
     <article v-for="video in videos" :key="video.id" class="video-card">
       <RouterLink class="video-cover" :to="`/mv/${video.id}`">
-        <span class="video-shadow" :style="coverStyle(video.coverUrl)"></span>
         <CoverImage
           :source="video.coverUrl"
           :width="464"
           :height="260"
+          role="video"
           :alt="video.name"
           loading="lazy"
           decoding="async"
+          viewport-unload
         />
       </RouterLink>
       <RouterLink class="video-title" :to="`/mv/${video.id}`">{{ video.name }}</RouterLink>
@@ -21,18 +22,9 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
 import CoverImage from '@/components/common/CoverImage.vue'
-import { coverImageUrl } from '@/platform/cover-image'
 import type { ArtistVideo } from '../domain/artist'
 
 defineProps<{ videos: readonly ArtistVideo[] }>()
-
-function imageUrl(source: string): string {
-  return coverImageUrl(source, 464, 260)
-}
-
-function coverStyle(source: string): Record<'--cover-image', string> {
-  return { '--cover-image': `url(${JSON.stringify(imageUrl(source))})` }
-}
 </script>
 
 <style scoped lang="scss">
@@ -82,17 +74,6 @@ function coverStyle(source: string): Record<'--cover-image', string> {
   }
 }
 
-.video-shadow {
-  position: absolute;
-  z-index: 0;
-  inset: 7px 8px -7px;
-  border-radius: 6px;
-  background: center / cover var(--cover-image);
-  opacity: 0;
-  transform: scale(0.92, 0.96);
-  transition: opacity 180ms ease;
-}
-
 .video-title,
 .video-date {
   display: -webkit-box;
@@ -125,8 +106,7 @@ function coverStyle(source: string): Record<'--cover-image', string> {
 
 @media (prefers-reduced-motion: reduce) {
   .video-card,
-  .video-cover img,
-  .video-shadow {
+  .video-cover img {
     transition: none;
   }
 

@@ -15,7 +15,8 @@
       <header class="artist-header">
         <CoverImage
           :source="detail.artist.coverUrl"
-          :width="512"
+          :width="220"
+          role="hero"
           :alt="detail.artist.name"
           decoding="async"
         />
@@ -91,7 +92,8 @@
             <RouterLink class="release-cover square" :to="`/album/${detail.latestRelease.id}`">
               <CoverImage
                 :source="detail.latestRelease.coverUrl"
-                :width="256"
+                :width="128"
+                role="card"
                 :alt="detail.latestRelease.name"
                 loading="lazy"
                 decoding="async"
@@ -112,8 +114,9 @@
             <RouterLink class="release-cover video" :to="`/mv/${latestVideo.id}`">
               <CoverImage
                 :source="latestVideo.coverUrl"
-                :width="464"
-                :height="260"
+                :width="228"
+                :height="128"
+                role="video"
                 :alt="latestVideo.name"
                 loading="lazy"
                 decoding="async"

@@ -1,36 +1,51 @@
 <template>
-  <div class="playlist-grid" role="list">
-    <article v-for="playlist in items" :key="playlist.id" class="playlist-card" role="listitem">
-      <RouterLink class="cover-link" :to="`/playlist/${playlist.id}`" :aria-label="playlist.name">
+  <div
+    :ref="virtualRows.listRoot"
+    class="playlist-grid"
+    :class="{ 'is-virtualized': isVirtualized }"
+    :style="listStyle"
+    role="list"
+  >
+    <article
+      v-for="row in renderedRows"
+      :key="String(row.key)"
+      class="playlist-card"
+      :class="{ 'is-virtual-row': isVirtualized }"
+      :style="rowStyle(row)"
+      role="listitem"
+    >
+      <RouterLink class="cover-link" :to="`/playlist/${row.item.id}`" :aria-label="row.item.name">
         <CoverImage
-          :source="playlist.coverUrl"
-          :width="128"
-          :alt="playlist.name"
+          :source="row.item.coverUrl"
+          :width="40"
+          role="row"
+          :alt="row.item.name"
           loading="lazy"
           decoding="async"
+          viewport-unload
         />
       </RouterLink>
 
       <div class="playlist-copy">
-        <RouterLink class="title" :to="`/playlist/${playlist.id}`" :title="playlist.name">
-          {{ playlist.name }}
+        <RouterLink class="title" :to="`/playlist/${row.item.id}`" :title="row.item.name">
+          {{ row.item.name }}
         </RouterLink>
-        <span v-if="mobileMeta(playlist)" class="mobile-meta" :title="mobileMeta(playlist)">
-          {{ mobileMeta(playlist) }}
+        <span v-if="mobileMeta(row.item)" class="mobile-meta" :title="mobileMeta(row.item)">
+          {{ mobileMeta(row.item) }}
         </span>
       </div>
 
-      <span class="creator" :title="playlist.creatorName">{{ playlist.creatorName }}</span>
-      <span class="track-count">{{ trackCount(playlist) }}</span>
+      <span class="creator" :title="row.item.creatorName">{{ row.item.creatorName }}</span>
+      <span class="track-count">{{ trackCount(row.item) }}</span>
       <button
         class="play-button"
         type="button"
         :title="t('playlist.play')"
         :aria-label="t('playlist.play')"
         :disabled="busyPlaylistId !== null"
-        @click="emit('play', playlist)"
+        @click="emit('play', row.item)"
       >
-        <span v-if="busyPlaylistId === playlist.id" class="spinner" aria-hidden="true"></span>
+        <span v-if="busyPlaylistId === row.item.id" class="spinner" aria-hidden="true"></span>
         <AppIcon v-else name="play" />
       </button>
     </article>
@@ -38,19 +53,39 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/common/AppIcon.vue'
 import CoverImage from '@/components/common/CoverImage.vue'
+import {
+  useFixedRowVirtualizer,
+  type FixedVirtualRow,
+} from '@/components/common/use-fixed-row-virtualizer'
 import type { LibraryPlaylist } from '../domain/library'
 
-defineProps<{
+const props = defineProps<{
   items: readonly LibraryPlaylist[]
   busyPlaylistId: number | null
 }>()
 
 const emit = defineEmits<{ play: [playlist: LibraryPlaylist] }>()
 const { t, locale } = useI18n()
+const virtualRows = useFixedRowVirtualizer(
+  computed(() => props.items),
+  {
+    rowHeight: 54,
+    getItemKey: (playlist) => playlist.id,
+  },
+)
+const { isVirtualized, listStyle, rowStyle } = virtualRows
+const renderedRows = computed<readonly (FixedVirtualRow & { readonly item: LibraryPlaylist })[]>(
+  () =>
+    virtualRows.visibleRows.value.flatMap((row) => {
+      const item = props.items[row.index]
+      return item === undefined ? [] : [{ ...row, item }]
+    }),
+)
 
 function trackCount(playlist: LibraryPlaylist): string {
   return `${new Intl.NumberFormat(locale.value).format(playlist.trackCount)} ${t('playlist.songs')}`
@@ -65,6 +100,12 @@ function mobileMeta(playlist: LibraryPlaylist): string {
 .playlist-grid {
   display: grid;
   width: 100%;
+
+  &.is-virtualized {
+    position: relative;
+    display: block;
+    contain: layout style;
+  }
 }
 
 .playlist-card {
@@ -84,6 +125,15 @@ function mobileMeta(playlist: LibraryPlaylist): string {
   transition: transform var(--motion-hover-emphasis) var(--ease-out);
   transform-origin: center;
 
+  &.is-virtual-row {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    transform: translate3d(0, var(--virtual-row-y), 0);
+    transition: none;
+  }
+
   &:hover {
     background: transparent;
     transform: scale(var(--scale-hover-row));
@@ -98,6 +148,12 @@ function mobileMeta(playlist: LibraryPlaylist): string {
 
   &:active {
     transform: scale(var(--scale-hover-row));
+  }
+
+  &.is-virtual-row:hover,
+  &.is-virtual-row:focus-within,
+  &.is-virtual-row:active {
+    transform: translate3d(0, var(--virtual-row-y), 0);
   }
 }
 

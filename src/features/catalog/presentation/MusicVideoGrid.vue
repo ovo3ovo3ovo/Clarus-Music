@@ -6,9 +6,11 @@
           :source="video.coverUrl"
           :width="464"
           :height="260"
+          role="video"
           :alt="video.name"
           loading="lazy"
           decoding="async"
+          viewport-unload
         />
       </RouterLink>
       <RouterLink class="video-title" :to="`/mv/${video.id}`">{{ video.name }}</RouterLink>

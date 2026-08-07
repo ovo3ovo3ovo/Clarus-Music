@@ -32,7 +32,7 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, shallowRef, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, shallowRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import ContentLoadingVeil from '@/components/common/ContentLoadingVeil.vue'
@@ -60,6 +60,15 @@ const playbackError = shallowRef<string | null>(null)
 const busyTrackId = shallowRef<number | null>(null)
 let loadController: AbortController | null = null
 let playbackController: AbortController | null = null
+let viewActive = true
+let loadedAuthKey: string | null = null
+const authKey = computed(() =>
+  authStore.restoring
+    ? 'restoring'
+    : authStore.session.authenticated
+      ? 'authenticated'
+      : 'signed-out',
+)
 
 function isAbort(reason: unknown): boolean {
   return reason instanceof DOMException && reason.name === 'AbortError'
@@ -70,6 +79,7 @@ function message(reason: unknown): string {
 }
 
 async function loadDailySongs(): Promise<void> {
+  if (!viewActive) return
   loadController?.abort('Daily songs load superseded')
   playbackController?.abort('Daily songs reloaded')
   tracks.value = []
@@ -84,7 +94,10 @@ async function loadDailySongs(): Promise<void> {
   loadController = controller
   loading.value = true
   try {
-    tracks.value = (await dailyGateway.load(controller.signal)).tracks
+    const loaded = await dailyGateway.load(controller.signal)
+    if (loadController !== controller || !viewActive) return
+    tracks.value = loaded.tracks
+    loadedAuthKey = authKey.value
   } catch (reason) {
     if (!isAbort(reason)) loadError.value = message(reason)
   } finally {
@@ -125,16 +138,26 @@ async function playTrack(track: Track): Promise<void> {
   }
 }
 
-watch(
-  [() => authStore.restoring, () => authStore.session.authenticated],
-  () => void loadDailySongs(),
-  { immediate: true },
-)
+watch(authKey, () => void loadDailySongs(), { immediate: true })
 
-onBeforeUnmount(() => {
-  loadController?.abort('Daily songs view disposed')
-  playbackController?.abort('Daily songs view disposed')
-})
+function suspendCachedView(reason: string): void {
+  viewActive = false
+  loadController?.abort(reason)
+  loadController = null
+  playbackController?.abort(reason)
+  playbackController = null
+  loading.value = false
+  busyTrackId.value = null
+}
+
+function resumeCachedView(): void {
+  viewActive = true
+  if (loadedAuthKey !== authKey.value || tracks.value.length === 0) void loadDailySongs()
+}
+
+onActivated(resumeCachedView)
+onDeactivated(() => suspendCachedView('Daily songs view hidden'))
+onBeforeUnmount(() => suspendCachedView('Daily songs view disposed'))
 </script>
 
 <style scoped lang="scss">

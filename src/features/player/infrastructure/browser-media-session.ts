@@ -43,8 +43,12 @@ function run(action: () => void | boolean | Promise<void | boolean>): void {
   }
 }
 
-function artworkUrl(url: string, size: number): string {
+const MEDIA_SESSION_ARTWORK_SIZE = 512
+
+function artworkUrl(url: string): string {
+  const size = MEDIA_SESSION_ARTWORK_SIZE
   return coverImageUrl(url, size, size, {
+    role: 'media-session',
     exact: true,
     maxWidth: size,
     minWidth: size,
@@ -130,11 +134,13 @@ export function createBrowserMediaSession(
           artist: track.artists.map(({ name }) => name).join(', '),
           album: track.album.name,
           artwork: track.album.coverUrl
-            ? [224, 512].map((size) => ({
-                src: artworkUrl(track.album.coverUrl, size),
-                sizes: `${size}x${size}`,
-                type: 'image/jpeg',
-              }))
+            ? [
+                {
+                  src: artworkUrl(track.album.coverUrl),
+                  sizes: `${MEDIA_SESSION_ARTWORK_SIZE}x${MEDIA_SESSION_ARTWORK_SIZE}`,
+                  type: 'image/jpeg',
+                },
+              ]
             : [],
         })
       } catch {

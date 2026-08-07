@@ -39,8 +39,14 @@
     <div class="left-side">
       <div class="player-panel">
         <div class="cover-wrap">
-          <CoverImage class="cover" :source="coverSource" :width="1024" alt="" decoding="async" />
-          <div class="cover-shadow" :style="coverShadowStyle" />
+          <CoverImage
+            class="cover"
+            :source="coverSource"
+            :width="580"
+            role="immersive"
+            alt=""
+            decoding="async"
+          />
         </div>
 
         <div class="track-row">
@@ -261,7 +267,7 @@ let stopPausedProgressWatch: (() => void) | null = null
 // presented immediately while its stream and lyrics resolve in parallel.
 const track = computed(() => player.pendingTrack ?? player.currentTrack)
 const coverSource = computed(() => track.value?.album.coverUrl ?? '')
-const coverUrl = computed(() => coverImageUrl(coverSource.value, 1024))
+const coverUrl = computed(() => coverImageUrl(coverSource.value, 580, 580, { role: 'immersive' }))
 const trackSubtitle = computed(() => {
   if (!track.value) return ''
   const artists = formatArtists(track.value.artists)
@@ -331,10 +337,6 @@ const backgroundStyle = computed(() => ({
 const textureStyle = computed(() => ({
   backgroundImage: coverUrl.value ? `url(${resizedCover(coverUrl.value, 64)})` : 'none',
 }))
-const coverShadowStyle = computed(() => ({
-  backgroundImage: coverUrl.value ? `url(${resizedCover(coverUrl.value, 256)})` : 'none',
-}))
-
 function resizedCover(url: string, size: number): string {
   return coverImageUrl(url, size, size, {
     exact: true,
@@ -1093,8 +1095,7 @@ onUnmounted(() => {
   aspect-ratio: 1;
 }
 
-.cover,
-.cover-shadow {
+.cover {
   position: absolute;
   width: 100%;
   height: 100%;
@@ -1106,15 +1107,6 @@ onUnmounted(() => {
   z-index: 1;
   border: 0;
   user-select: none;
-}
-
-.cover-shadow {
-  top: 12px;
-  z-index: 0;
-  background-position: center;
-  background-size: cover;
-  opacity: 0;
-  transform: scale(0.92, 0.96);
 }
 
 .track-row {

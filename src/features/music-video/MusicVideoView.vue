@@ -137,7 +137,9 @@ function applyVideoSource(current: MusicVideoDetail): void {
   videoPlayer.source = {
     type: 'video',
     title: current.name,
-    poster: coverImageUrl(current.coverUrl, 960, 540),
+    // A poster remains visible behind the native video decoder, so use the
+    // bounded video policy instead of allocating a Retina 1920px bitmap.
+    poster: coverImageUrl(current.coverUrl, 960, 540, { role: 'video' }),
     sources: current.sources.map((source) => ({
       src: source.url,
       type: source.mimeType,

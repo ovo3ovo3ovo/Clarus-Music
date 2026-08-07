@@ -1,25 +1,37 @@
 <template>
-  <div class="artist-list" role="list">
+  <div
+    :ref="virtualRows.listRoot"
+    class="artist-list"
+    :class="{ 'is-virtualized': isVirtualized }"
+    :style="listStyle"
+    role="list"
+  >
     <RouterLink
-      v-for="(artist, index) in artists"
-      :key="artist.id"
+      v-for="row in renderedRows"
+      :key="String(row.key)"
       class="artist-row"
-      :to="`/artist/${artist.id}`"
-      :aria-label="artist.description ? `${artist.name} · ${artist.description}` : artist.name"
+      :class="{ 'is-virtual-row': isVirtualized }"
+      :style="rowStyle(row)"
+      :to="`/artist/${row.item.id}`"
+      :aria-label="
+        row.item.description ? `${row.item.name} · ${row.item.description}` : row.item.name
+      "
       role="listitem"
     >
-      <span class="artist-number">{{ index + 1 }}</span>
+      <span class="artist-number">{{ row.index + 1 }}</span>
       <CoverImage
-        :source="artist.coverUrl"
-        :width="128"
-        :alt="artist.name"
+        :source="row.item.coverUrl"
+        :width="36"
+        role="avatar"
+        :alt="row.item.name"
         loading="lazy"
         decoding="async"
+        viewport-unload
       />
       <span class="artist-copy">
-        <strong>{{ artist.name }}</strong>
-        <small v-if="artist.description" :title="artist.description">{{
-          artist.description
+        <strong>{{ row.item.name }}</strong>
+        <small v-if="row.item.description" :title="row.item.description">{{
+          row.item.description
         }}</small>
       </span>
     </RouterLink>
@@ -27,17 +39,42 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import CoverImage from '@/components/common/CoverImage.vue'
+import {
+  useFixedRowVirtualizer,
+  type FixedVirtualRow,
+} from '@/components/common/use-fixed-row-virtualizer'
 import type { ArtistCard } from '@/features/catalog/domain/catalog'
 
-defineProps<{ artists: readonly ArtistCard[] }>()
+const props = defineProps<{ artists: readonly ArtistCard[] }>()
+const virtualRows = useFixedRowVirtualizer(
+  computed(() => props.artists),
+  {
+    rowHeight: 46,
+    getItemKey: (artist) => artist.id,
+  },
+)
+const { isVirtualized, listStyle, rowStyle } = virtualRows
+const renderedRows = computed<readonly (FixedVirtualRow & { readonly item: ArtistCard })[]>(() =>
+  virtualRows.visibleRows.value.flatMap((row) => {
+    const item = props.artists[row.index]
+    return item === undefined ? [] : [{ ...row, item }]
+  }),
+)
 </script>
 
 <style scoped lang="scss">
 .artist-list {
   display: grid;
   width: 100%;
+
+  &.is-virtualized {
+    position: relative;
+    display: block;
+    contain: layout style;
+  }
 }
 
 .artist-row {
@@ -59,6 +96,15 @@ defineProps<{ artists: readonly ArtistCard[] }>()
     transform var(--motion-hover-emphasis) var(--ease-out);
   transform-origin: center;
 
+  &.is-virtual-row {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    transform: translate3d(0, var(--virtual-row-y), 0);
+    transition: none;
+  }
+
   &:hover {
     background: transparent;
     transform: scale(var(--scale-hover-row));
@@ -73,6 +119,12 @@ defineProps<{ artists: readonly ArtistCard[] }>()
 
   &:active {
     transform: scale(var(--scale-hover-row));
+  }
+
+  &.is-virtual-row:hover,
+  &.is-virtual-row:focus-visible,
+  &.is-virtual-row:active {
+    transform: translate3d(0, var(--virtual-row-y), 0);
   }
 
   img {

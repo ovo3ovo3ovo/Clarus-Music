@@ -1,24 +1,77 @@
+/**
+ * Artwork is one of the few resources for which a small URL can represent a
+ * large amount of renderer memory.  Keep the requested pixel dimensions tied
+ * to the place where the artwork is displayed instead of treating every cover
+ * as a detail image.
+ */
+export type CoverImageRole =
+  'row' | 'avatar' | 'player' | 'card' | 'hero' | 'immersive' | 'media-session' | 'video'
+
 export interface CoverImageOptions {
   readonly exact?: boolean
   readonly maxWidth?: number
   readonly minWidth?: number
   readonly pixelRatio?: number
+  readonly role?: CoverImageRole
 }
 
-const SQUARE_WIDTHS = [512, 1024, 1600] as const
-const LANDSCAPE_WIDTHS = [960, 1280, 1920] as const
-const MAX_ACTIVE_PRELOADS = 4
-const MAX_PENDING_PRELOADS = 32
-const MAX_REMEMBERED_PRELOADS = 512
-const PRELOAD_TIMEOUT_MS = 15_000
-const prefetchedUrls = new Map<string, true>()
-const activePreloads = new Map<HTMLImageElement, string>()
-const pendingPreloads: string[] = []
+export interface CoverPreloadOptions {
+  readonly width?: number
+  readonly height?: number
+  readonly role?: CoverImageRole
+}
+
+interface CoverImagePolicy {
+  readonly minWidth: number
+  readonly maxWidth: number
+}
+
+interface CoverImageRequest {
+  readonly url: string
+  readonly width: number
+  readonly height: number
+}
+
+interface PreloadRequest extends CoverImageRequest {
+  readonly decodedBytes: number
+}
+
+/**
+ * These are physical-pixel bounds.  They deliberately describe the visual
+ * role, not an API endpoint: callers still pass their rendered CSS size and
+ * the request is scaled for the current display density below.
+ */
+export const COVER_IMAGE_POLICIES: Readonly<Record<CoverImageRole, CoverImagePolicy>> = {
+  row: { minWidth: 96, maxWidth: 160 },
+  avatar: { minWidth: 96, maxWidth: 160 },
+  player: { minWidth: 128, maxWidth: 160 },
+  card: { minWidth: 128, maxWidth: 512 },
+  hero: { minWidth: 256, maxWidth: 768 },
+  immersive: { minWidth: 512, maxWidth: 1600 },
+  'media-session': { minWidth: 256, maxWidth: 512 },
+  video: { minWidth: 320, maxWidth: 1280 },
+}
+
+// A compact set keeps CDN cache keys reusable without forcing a 512px decode
+// for a 36–48px list thumbnail.
+const SQUARE_WIDTHS = [96, 128, 160, 256, 384, 512, 768, 1024, 1280, 1600] as const
+const LANDSCAPE_WIDTHS = [160, 240, 320, 480, 640, 960, 1280, 1600, 1920] as const
+const MAX_ACTIVE_PRELOADS = 1
+const MAX_PENDING_PRELOADS = 2
+const MAX_REMEMBERED_PRELOADS = 16
+const MAX_REMEMBERED_PRELOAD_BYTES = 2 * 1024 * 1024
+const PRELOAD_TIMEOUT_MS = 8_000
+const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='
+
+const prefetchedUrls = new Map<string, PreloadRequest>()
+const activePreloads = new Map<HTMLImageElement, PreloadRequest>()
+const pendingPreloads: PreloadRequest[] = []
+let rememberedPreloadBytes = 0
 
 function normalizedPixelRatio(value?: number): number {
-  if (value !== undefined && Number.isFinite(value)) return Math.max(1, value)
+  if (value !== undefined && Number.isFinite(value)) return Math.min(2, Math.max(1, value))
   const deviceRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio
-  return Math.max(2, Number.isFinite(deviceRatio) ? deviceRatio : 1)
+  return Math.min(2, Math.max(1, Number.isFinite(deviceRatio) ? deviceRatio : 1))
 }
 
 function selectedWidth(target: number, widths: readonly number[]): number {
@@ -73,23 +126,27 @@ function sourceVariants(source: string): readonly string[] {
   return variants
 }
 
-export function coverImageUrl(
+function coverPolicy(options: CoverImageOptions): CoverImagePolicy | null {
+  return options.role ? COVER_IMAGE_POLICIES[options.role] : null
+}
+
+function resolveCoverImageRequest(
   source: string,
   logicalWidth: number,
-  logicalHeight = logicalWidth,
-  options: CoverImageOptions = {},
-): string {
+  logicalHeight: number,
+  options: CoverImageOptions,
+): CoverImageRequest | null {
   const normalized = normalizedSource(source)
-  if (normalized.length === 0) return ''
+  if (normalized.length === 0) return null
 
   const width = Math.max(1, logicalWidth)
   const height = Math.max(1, logicalHeight)
+  const policy = coverPolicy(options)
   const ratio = normalizedPixelRatio(options.pixelRatio)
   const square = width === height
-  const defaultMinimum = square ? 512 : 960
   const defaultMaximum = square ? 1600 : 1920
-  const minimum = Math.max(1, options.minWidth ?? defaultMinimum)
-  const maximum = Math.max(minimum, options.maxWidth ?? defaultMaximum)
+  const minimum = Math.max(1, options.minWidth ?? policy?.minWidth ?? 1)
+  const maximum = Math.max(minimum, options.maxWidth ?? policy?.maxWidth ?? defaultMaximum)
   const desiredWidth = Math.min(maximum, Math.max(minimum, Math.ceil(width * ratio)))
   const outputWidth = options.exact
     ? desiredWidth
@@ -101,18 +158,41 @@ export function coverImageUrl(
   try {
     const url = new URL(normalized)
     url.searchParams.set('param', `${outputWidth}y${outputHeight}`)
-    return url.toString()
+    return { url: url.toString(), width: outputWidth, height: outputHeight }
   } catch {
     const separator = normalized.includes('?') ? '&' : '?'
-    return `${normalized}${separator}param=${outputWidth}y${outputHeight}`
+    return {
+      url: `${normalized}${separator}param=${outputWidth}y${outputHeight}`,
+      width: outputWidth,
+      height: outputHeight,
+    }
   }
+}
+
+export function coverImageUrl(
+  source: string,
+  logicalWidth: number,
+  logicalHeight = logicalWidth,
+  options: CoverImageOptions = {},
+): string {
+  return resolveCoverImageRequest(source, logicalWidth, logicalHeight, options)?.url ?? ''
+}
+
+function fallbackWidths(
+  request: CoverImageRequest,
+  square: boolean,
+  minimum: number,
+): readonly number[] {
+  const widths = square ? SQUARE_WIDTHS : LANDSCAPE_WIDTHS
+  // The renderer targets an ES2022 runtime, so avoid Array.prototype.toReversed
+  // even though recent Safari supports it.  A copied reverse preserves the
+  // immutable bucket tuples above without raising the application's lib target.
+  return [...widths].filter((width) => width < request.width && width >= minimum).reverse()
 }
 
 /**
  * Returns a short, ordered list of artwork URLs that can recover from a
- * transient CDN error or an unsupported high-resolution `param` request.
- * The first candidate is always the normal Retina-sized request so healthy
- * images keep their existing quality and caching behaviour.
+ * transient CDN error.  Fallbacks never upscale the normal visual request.
  */
 export function coverImageCandidates(
   source: string,
@@ -123,27 +203,30 @@ export function coverImageCandidates(
   const normalized = normalizedSource(source)
   if (normalized.length === 0) return []
 
-  const targetWidth = Math.max(1, logicalWidth)
-  const targetHeight = Math.max(1, logicalHeight)
-  const square = targetWidth === targetHeight
+  const initial = resolveCoverImageRequest(source, logicalWidth, logicalHeight, options)
+  if (initial === null) return []
+  const square = Math.max(1, logicalWidth) === Math.max(1, logicalHeight)
+  const minimum = Math.max(1, options.minWidth ?? coverPolicy(options)?.minWidth ?? 1)
   const candidates: string[] = []
   const add = (candidate: string): void => {
     if (candidate.length > 0 && !candidates.includes(candidate)) candidates.push(candidate)
   }
 
   for (const variant of sourceVariants(source)) {
-    add(coverImageUrl(variant, targetWidth, targetHeight, options))
+    add(coverImageUrl(variant, logicalWidth, logicalHeight, options))
   }
 
-  const fallbackWidths = square ? [1600, 1024, 512, 256, 128] : [1920, 1280, 960, 640, 480, 320]
-  for (const fallbackWidth of fallbackWidths) {
+  for (const fallbackWidth of fallbackWidths(initial, square, minimum)) {
     add(
       coverImageUrl(
         normalized,
         fallbackWidth,
         square
           ? fallbackWidth
-          : Math.max(1, Math.round(fallbackWidth * (targetHeight / targetWidth))),
+          : Math.max(
+              1,
+              Math.round(fallbackWidth * (Math.max(1, logicalHeight) / Math.max(1, logicalWidth))),
+            ),
         {
           exact: true,
           maxWidth: fallbackWidth,
@@ -161,71 +244,88 @@ export function coverImageCandidates(
   return candidates
 }
 
-export function preloadCoverImages(source: string): void {
+/**
+ * Speculative artwork is intentionally tiny and bounded.  It helps a player
+ * hand-off without filling WebKit's decoded-image cache with every track the
+ * user has visited.
+ */
+export function preloadCoverImages(source: string, options: CoverPreloadOptions = {}): void {
   if (typeof Image === 'undefined' || source.length === 0) return
 
-  for (const size of [512, 1024] as const) {
-    const url = coverImageUrl(source, size, size, {
-      exact: true,
-      maxWidth: size,
-      minWidth: size,
-      pixelRatio: 1,
-    })
-    if (
-      url.length === 0 ||
-      touchRememberedPreload(url) ||
-      pendingPreloads.length >= MAX_PENDING_PRELOADS ||
-      !rememberPreload(url)
-    ) {
-      continue
-    }
-    pendingPreloads.push(url)
+  const width = options.width ?? 160
+  const height = options.height ?? width
+  const request = resolveCoverImageRequest(source, width, height, {
+    role: options.role ?? 'player',
+  })
+  if (request === null) return
+
+  const preload: PreloadRequest = {
+    ...request,
+    decodedBytes: request.width * request.height * 4,
   }
+  if (
+    touchRememberedPreload(preload.url) ||
+    pendingPreloads.some(({ url }) => url === preload.url) ||
+    pendingPreloads.length >= MAX_PENDING_PRELOADS ||
+    !rememberPreload(preload)
+  ) {
+    return
+  }
+  pendingPreloads.push(preload)
   pumpCoverPreloads()
 }
 
 function touchRememberedPreload(url: string): boolean {
-  if (!prefetchedUrls.has(url)) return false
+  const existing = prefetchedUrls.get(url)
+  if (!existing) return false
   prefetchedUrls.delete(url)
-  prefetchedUrls.set(url, true)
+  prefetchedUrls.set(url, existing)
   return true
 }
 
-function rememberPreload(url: string): boolean {
-  if (prefetchedUrls.has(url)) return false
+function rememberPreload(request: PreloadRequest): boolean {
+  if (prefetchedUrls.has(request.url)) return false
 
-  if (prefetchedUrls.size >= MAX_REMEMBERED_PRELOADS) {
-    const activeUrls = new Set(activePreloads.values())
+  const activeUrls = new Set([...activePreloads.values()].map(({ url }) => url))
+  while (
+    prefetchedUrls.size >= MAX_REMEMBERED_PRELOADS ||
+    rememberedPreloadBytes + request.decodedBytes > MAX_REMEMBERED_PRELOAD_BYTES
+  ) {
     let evicted = false
-    for (const candidate of prefetchedUrls.keys()) {
-      if (activeUrls.has(candidate) || pendingPreloads.includes(candidate)) continue
-      prefetchedUrls.delete(candidate)
+    for (const [url, candidate] of prefetchedUrls) {
+      if (activeUrls.has(url) || pendingPreloads.some((pending) => pending.url === url)) continue
+      prefetchedUrls.delete(url)
+      rememberedPreloadBytes -= candidate.decodedBytes
       evicted = true
       break
     }
     if (!evicted) return false
   }
 
-  prefetchedUrls.set(url, true)
+  prefetchedUrls.set(request.url, request)
+  rememberedPreloadBytes += request.decodedBytes
   return true
 }
 
 function pumpCoverPreloads(): void {
   while (activePreloads.size < MAX_ACTIVE_PRELOADS && pendingPreloads.length > 0) {
-    const url = pendingPreloads.shift()
-    if (!url) continue
+    const request = pendingPreloads.shift()
+    if (!request) continue
     const image = new Image()
     image.decoding = 'async'
-    activePreloads.set(image, url)
+    activePreloads.set(image, request)
     let timeout: ReturnType<typeof globalThis.setTimeout> | null = null
     const release = () => {
       if (!activePreloads.delete(image)) return
       if (timeout !== null) globalThis.clearTimeout(timeout)
+      // Drop the element's decoded-image reference as soon as the speculative
+      // request completes.  HTTP cache reuse is still available to visible UI.
+      image.src = EMPTY_IMAGE_SRC
       pumpCoverPreloads()
     }
     image.addEventListener('load', release, { once: true })
     image.addEventListener('error', release, { once: true })
     timeout = globalThis.setTimeout(release, PRELOAD_TIMEOUT_MS)
-    image.src = url
+    image.src = request.url
   }
 }

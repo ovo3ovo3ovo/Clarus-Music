@@ -7,6 +7,7 @@
             class="avatar"
             :source="authStore.session.user.avatarUrl"
             :width="88"
+            role="avatar"
             alt=""
             decoding="async"
           />

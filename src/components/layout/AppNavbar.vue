@@ -75,6 +75,7 @@
             v-if="authStore.session.user"
             :source="authStore.session.user.avatarUrl"
             :width="48"
+            role="avatar"
             alt=""
           />
           <AppIcon v-else name="login" />

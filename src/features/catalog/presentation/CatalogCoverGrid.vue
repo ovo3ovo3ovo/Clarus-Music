@@ -1,53 +1,91 @@
 <template>
-  <div class="catalog-cover-grid" role="list">
+  <div
+    :ref="virtualRows.listRoot"
+    class="catalog-cover-grid"
+    :class="{ 'is-virtualized': isVirtualized }"
+    :style="listStyle"
+    role="list"
+  >
     <article
-      v-for="item in items"
-      :key="`${item.kind}-${item.id}`"
+      v-for="row in renderedRows"
+      :key="String(row.key)"
       class="cover-card"
+      :class="{ 'is-virtual-row': isVirtualized }"
+      :style="rowStyle(row)"
       role="listitem"
     >
-      <RouterLink class="cover-link" :to="`/${item.kind}/${item.id}`" :aria-label="item.name">
+      <RouterLink
+        class="cover-link"
+        :to="`/${row.item.kind}/${row.item.id}`"
+        :aria-label="row.item.name"
+      >
         <CoverImage
-          :source="item.coverUrl"
-          :width="128"
-          :alt="item.name"
+          :source="row.item.coverUrl"
+          :width="40"
+          role="row"
+          :alt="row.item.name"
           loading="lazy"
           decoding="async"
+          viewport-unload
         />
       </RouterLink>
 
       <div class="cover-copy">
-        <RouterLink class="title" :to="`/${item.kind}/${item.id}`" :title="item.name">
-          {{ item.name }}
+        <RouterLink class="title" :to="`/${row.item.kind}/${row.item.id}`" :title="row.item.name">
+          {{ row.item.name }}
         </RouterLink>
-        <span v-if="mobileContext(item)" class="mobile-context" :title="mobileContext(item)">
-          {{ mobileContext(item) }}
+        <span
+          v-if="mobileContext(row.item)"
+          class="mobile-context"
+          :title="mobileContext(row.item)"
+        >
+          {{ mobileContext(row.item) }}
         </span>
       </div>
 
       <RouterLink
-        v-if="item.kind === 'album'"
+        v-if="row.item.kind === 'album'"
         class="item-context"
-        :to="`/artist/${item.artistId}`"
-        :title="item.artistName"
+        :to="`/artist/${row.item.artistId}`"
+        :title="row.item.artistName"
       >
-        {{ item.artistName }}
+        {{ row.item.artistName }}
       </RouterLink>
-      <span v-else class="item-context" :title="context(item)">{{ context(item) }}</span>
-      <span class="item-metric" :class="{ empty: !metric(item) }">{{ metric(item) }}</span>
+      <span v-else class="item-context" :title="context(row.item)">{{ context(row.item) }}</span>
+      <span class="item-metric" :class="{ empty: !metric(row.item) }">{{ metric(row.item) }}</span>
     </article>
   </div>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import CoverImage from '@/components/common/CoverImage.vue'
+import {
+  useFixedRowVirtualizer,
+  type FixedVirtualRow,
+} from '@/components/common/use-fixed-row-virtualizer'
 import type { CatalogCoverCard } from '../domain/catalog'
 
-defineProps<{ items: readonly CatalogCoverCard[] }>()
+const props = defineProps<{ items: readonly CatalogCoverCard[] }>()
 
 const { t, locale } = useI18n()
+const virtualRows = useFixedRowVirtualizer(
+  computed(() => props.items),
+  {
+    rowHeight: 54,
+    getItemKey: (item) => `${item.kind}-${item.id}`,
+  },
+)
+const { isVirtualized, listStyle, rowStyle } = virtualRows
+const renderedRows = computed<readonly (FixedVirtualRow & { readonly item: CatalogCoverCard })[]>(
+  () =>
+    virtualRows.visibleRows.value.flatMap((row) => {
+      const item = props.items[row.index]
+      return item === undefined ? [] : [{ ...row, item }]
+    }),
+)
 
 function context(item: CatalogCoverCard): string {
   if (item.kind === 'playlist') return item.creatorName
@@ -69,6 +107,12 @@ function mobileContext(item: CatalogCoverCard): string {
 .catalog-cover-grid {
   display: grid;
   width: 100%;
+
+  &.is-virtualized {
+    position: relative;
+    display: block;
+    contain: layout style;
+  }
 }
 
 .cover-card {
@@ -88,6 +132,15 @@ function mobileContext(item: CatalogCoverCard): string {
   transition: transform var(--motion-hover-emphasis) var(--ease-out);
   transform-origin: center;
 
+  &.is-virtual-row {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    transform: translate3d(0, var(--virtual-row-y), 0);
+    transition: none;
+  }
+
   &:hover {
     background: transparent;
     transform: scale(var(--scale-hover-row));
@@ -102,6 +155,12 @@ function mobileContext(item: CatalogCoverCard): string {
 
   &:active {
     transform: scale(var(--scale-hover-row));
+  }
+
+  &.is-virtual-row:hover,
+  &.is-virtual-row:focus-within,
+  &.is-virtual-row:active {
+    transform: translate3d(0, var(--virtual-row-y), 0);
   }
 }
 

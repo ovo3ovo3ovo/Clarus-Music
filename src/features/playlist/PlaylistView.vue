@@ -17,7 +17,8 @@
           <CoverImage
             v-if="authStore.session.user?.avatarUrl"
             :source="authStore.session.user.avatarUrl"
-            :width="96"
+            :width="44"
+            role="avatar"
             alt=""
             decoding="async"
           />
@@ -134,8 +135,13 @@
           :disabled="busy"
           @click="playFirst"
         >
-          <span class="cover-shadow" :style="coverStyle"></span>
-          <CoverImage :source="detail.coverUrl" :width="1024" :alt="detail.name" decoding="async" />
+          <CoverImage
+            :source="detail.coverUrl"
+            :width="232"
+            role="hero"
+            :alt="detail.name"
+            decoding="async"
+          />
           <span class="cover-play"><AppIcon name="play" /></span>
         </button>
 
@@ -376,7 +382,6 @@ import { releaseAudioSource } from '@/features/player/domain/audio-engine'
 import { usePlayerStore } from '@/features/player/application/player-store'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import VirtualTrackList from '@/features/search/presentation/VirtualTrackList.vue'
-import { coverImageUrl } from '@/platform/cover-image'
 import type { Track } from '@/types/music'
 import {
   PLAYLIST_PAGE_SIZE,
@@ -523,8 +528,6 @@ const canEdit = computed(
     detail.value !== null &&
     detail.value.creator.userId === authStore.session.user?.userId,
 )
-const coverUrl = computed(() => imageUrl(detail.value?.coverUrl ?? '', 1024))
-const coverStyle = computed(() => ({ '--cover-image': `url(${JSON.stringify(coverUrl.value)})` }))
 const creatorUrl = computed(
   () => `https://music.163.com/#/user/home?id=${detail.value?.creator.userId ?? 0}`,
 )
@@ -533,10 +536,6 @@ const formattedDate = computed(() =>
     new Date(detail.value?.updateTime ?? 0),
   ),
 )
-
-function imageUrl(source: string, size: number): string {
-  return coverImageUrl(source, size)
-}
 
 function message(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason)
@@ -610,7 +609,13 @@ function suspendCachedView(): void {
   viewActive = false
   detailController?.abort('Playlist view hidden')
   detailController = null
+  pageController?.abort('Playlist view hidden')
+  pageController = null
+  playbackController?.abort('Playlist view hidden')
+  playbackController = null
   loading.value = false
+  loadingMore.value = false
+  hydrating.value = false
 }
 
 function resumeCachedView(): void {
@@ -669,14 +674,22 @@ async function loadMore(): Promise<void> {
 }
 
 async function hydrateRemaining(): Promise<void> {
-  if (hydrating.value || !hasMore.value) return
+  // Full hydration is deliberately reserved for an explicit in-page search.
+  // Normal playback now receives a small, on-demand queue continuation from
+  // the player store rather than keeping every row and cover alive here.
+  if (!viewActive || !searchOpen.value || hydrating.value || !hasMore.value) return
   pageController?.abort('Playlist hydration superseded')
   const controller = new AbortController()
   pageController = controller
   hydrating.value = true
   operationError.value = null
   try {
-    while (pageController === controller && (await requestNextPage(controller))) {
+    while (
+      viewActive &&
+      searchOpen.value &&
+      pageController === controller &&
+      (await requestNextPage(controller))
+    ) {
       // Sequential bounded pages prevent request bursts and keep cancellation immediate.
     }
   } catch (reason) {
@@ -687,6 +700,33 @@ async function hydrateRemaining(): Promise<void> {
       hydrating.value = false
     }
   }
+}
+
+function configureQueueContinuation(current: PlaylistDetail): void {
+  const expectedSource = sourceKey.value
+  let continuationOffset = nextOffset.value
+  player.setQueueContinuation(expectedSource, {
+    async loadNext(signal) {
+      // A manually loaded page may have advanced the visible list since the
+      // continuation was registered.  It has already been appended to the
+      // player queue, so skip it instead of downloading it a second time.
+      if (detail.value === current && sourceKey.value === expectedSource) {
+        continuationOffset = Math.max(continuationOffset, nextOffset.value)
+      }
+      const requestedIds = current.trackIds.slice(
+        continuationOffset,
+        continuationOffset + PLAYLIST_PAGE_SIZE,
+      )
+      if (requestedIds.length === 0) return { tracks: [], hasMore: false }
+      const page = await playlistGateway.trackPage(requestedIds, signal)
+      const consumed = Math.max(page.requestedCount, requestedIds.length)
+      continuationOffset = Math.min(current.trackIds.length, continuationOffset + consumed)
+      return {
+        tracks: page.tracks.filter((candidate) => candidate.playable),
+        hasMore: continuationOffset < current.trackIds.length,
+      }
+    },
+  })
 }
 
 async function playTrack(track: Track): Promise<void> {
@@ -709,7 +749,9 @@ async function playTrack(track: Track): Promise<void> {
     }
     player.setQueue(selection.queue, selection.index, sourceKey.value)
     await player.load(selection.track, source, true, controller.signal)
-    void hydrateRemaining()
+    const current = detail.value
+    if (current !== null && sourceKey.value === player.queueSource)
+      configureQueueContinuation(current)
   } catch (reason) {
     if (!isAbort(reason)) operationError.value = message(reason)
   } finally {
@@ -1052,15 +1094,6 @@ onBeforeUnmount(() => {
     opacity: 1;
     transform: scale(1);
   }
-}
-
-.cover-shadow {
-  position: absolute;
-  z-index: -1;
-  inset: 18px 12px -12px;
-  border-radius: var(--radius-md);
-  background: var(--cover-image) center / cover;
-  opacity: 0;
 }
 
 .cover-play {

@@ -20,8 +20,13 @@
           :disabled="busy"
           @click="playFirst"
         >
-          <span class="cover-shadow" :style="coverStyle"></span>
-          <CoverImage :source="detail.coverUrl" :width="1024" :alt="detail.name" decoding="async" />
+          <CoverImage
+            :source="detail.coverUrl"
+            :width="232"
+            role="hero"
+            :alt="detail.name"
+            decoding="async"
+          />
           <span class="cover-play"><AppIcon name="play" /></span>
         </button>
 
@@ -164,7 +169,6 @@ import { releaseAudioSource } from '@/features/player/domain/audio-engine'
 import { usePlayerStore } from '@/features/player/application/player-store'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import VirtualTrackList from '@/features/search/presentation/VirtualTrackList.vue'
-import { coverImageUrl } from '@/platform/cover-image'
 import { externalLinkGateway } from '@/platform/external-links'
 import type { Track } from '@/types/music'
 import {
@@ -202,8 +206,6 @@ const albumId = computed(() => parsePositiveIntegerRouteParam(route.params.id))
 const tracks = computed(() => (detail.value ? flattenAlbumTracks(detail.value.discs) : []))
 const albumTitle = computed(() => splitAlbumTitle(detail.value?.name ?? ''))
 const sourceKey = computed(() => `album:${albumId.value ?? 0}`)
-const coverUrl = computed(() => imageUrl(detail.value?.coverUrl ?? '', 1024))
-const coverStyle = computed(() => ({ '--cover-image': `url(${JSON.stringify(coverUrl.value)})` }))
 const busy = computed(
   () => busyTrackId.value !== null || tracks.value.every((track) => !track.playable),
 )
@@ -224,10 +226,6 @@ const humanDuration = computed(() => {
     .filter(Boolean)
     .join(' ')
 })
-
-function imageUrl(source: string, size: number): string {
-  return coverImageUrl(source, size)
-}
 
 function message(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason)
@@ -418,15 +416,6 @@ onBeforeUnmount(() => {
     opacity: 1;
     transform: translate(-50%, -50%) scale(1);
   }
-}
-
-.cover-shadow {
-  position: absolute;
-  z-index: 0;
-  inset: 20px 14px -14px;
-  border-radius: var(--radius-md);
-  background: center / cover var(--cover-image);
-  opacity: 0;
 }
 
 .cover-play {

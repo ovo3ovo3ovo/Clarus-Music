@@ -46,6 +46,31 @@ interface StreamGateway {
 
 type MediaSessionFactory = (transport: MediaSessionTransport) => PlayerMediaSession
 
+/**
+ * A page-owned playlist can give the player a lightweight continuation instead
+ * of eagerly materializing every track in a long collection.  The store asks
+ * for another page only when the known queue is close to exhaustion.
+ */
+export interface PlayerQueueContinuationPage {
+  readonly tracks: readonly Track[]
+  readonly hasMore: boolean
+}
+
+export interface PlayerQueueContinuation {
+  loadNext(signal: AbortSignal): Promise<PlayerQueueContinuationPage>
+}
+
+interface QueueContinuationState {
+  readonly source: string
+  readonly continuation: PlayerQueueContinuation
+  hasMore: boolean
+}
+
+type QueueContinuationFetchResult = 'added' | 'empty' | 'unavailable'
+
+const QUEUE_PREFETCH_AHEAD = 12
+const MAX_EMPTY_QUEUE_CONTINUATION_PAGES = 3
+
 function defaultQueuePersistence(storeId: string): PlayerQueuePersistence {
   if (storeId !== 'player') return noPlayerQueuePersistence
   try {
@@ -102,6 +127,11 @@ export function createPlayerStore(
     const currentTrack = shallowRef<Track | null>(restoredSnapshot?.currentTrack ?? null)
     const pendingTrack = shallowRef<Track | null>(null)
     const queue = shallowRef<readonly Track[]>(restoredSnapshot?.queue ?? [])
+    // appendQueue is exercised for every continuation page.  Keeping this
+    // companion index avoids rebuilding a Set from the entire queue for every
+    // page, which used to turn a long playlist hydration into repeated O(n)
+    // allocations on the renderer's main thread.
+    let queuedTrackIds = new Set(queue.value.map(({ id }) => id))
     const playNextQueue = shallowRef<readonly Track[]>(restoredSnapshot?.playNextQueue ?? [])
     const playbackOrder = shallowRef<readonly number[]>(restoredSnapshot?.playbackOrder ?? [])
     const queueSource = shallowRef<string | null>(restoredSnapshot?.queueSource ?? null)
@@ -127,6 +157,11 @@ export function createPlayerStore(
     let likeController: AbortController | null = null
     let likeStateVersion = 0
     let stopProgressSubscription: (() => void) | null = null
+    let queueContinuation: QueueContinuationState | null = null
+    let queueContinuationController: AbortController | null = null
+    let queueContinuationTask: Promise<QueueContinuationFetchResult> | null = null
+    let queueContinuationTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+    let lastPreloadedCoverKey = ''
     const playing = computed(() => state.value === 'playing')
     const enabled = computed(() => currentTrack.value !== null)
     const upcomingTracks = computed(() =>
@@ -246,7 +281,10 @@ export function createPlayerStore(
     const syncProgressClock = () => {
       stopProgressClock()
       if (playing.value && !document.hidden) {
-        stopProgressSubscription = playbackFrameScheduler.subscribe(tickProgress, playbackClock.read)
+        stopProgressSubscription = playbackFrameScheduler.subscribe(
+          tickProgress,
+          playbackClock.read,
+        )
       } else {
         playbackFrameScheduler.wake()
       }
@@ -333,7 +371,6 @@ export function createPlayerStore(
         sourceTransferred = true
         if (activeLoad.value !== controller) return
         currentTrack.value = track
-        preloadCoverImages(track.album.coverUrl)
         restoredTrackPending = false
         restoredProgress = 0
         refreshLikeState(track)
@@ -379,28 +416,152 @@ export function createPlayerStore(
       pendingTrack.value = null
     }
 
+    function cancelQueueContinuation(reason: string): void {
+      if (queueContinuationTimer !== null) {
+        globalThis.clearTimeout(queueContinuationTimer)
+        queueContinuationTimer = null
+      }
+      queueContinuationController?.abort(reason)
+      queueContinuationController = null
+      queueContinuationTask = null
+      queueContinuation = null
+    }
+
+    function queuedTracksAhead(): number {
+      const playNext = playNextQueue.value[0]?.playable ? 1 : 0
+      return playNext + upcomingTracks.value.filter(({ playable }) => playable).length
+    }
+
+    function preloadNextCover(): void {
+      const track = playNextQueue.value.find(({ playable }) => playable) ?? upcomingTracks.value[0]
+      if (!track?.album.coverUrl) return
+      const key = `${track.id}:${track.album.coverUrl}`
+      if (key === lastPreloadedCoverKey) return
+      lastPreloadedCoverKey = key
+      preloadCoverImages(track.album.coverUrl, { width: 160, role: 'player' })
+    }
+
+    async function fetchQueueContinuationPage(
+      reportError = false,
+    ): Promise<QueueContinuationFetchResult> {
+      if (queueContinuationTask !== null) return queueContinuationTask
+      const continuationState = queueContinuation
+      if (
+        continuationState === null ||
+        !continuationState.hasMore ||
+        queueSource.value !== continuationState.source
+      ) {
+        return 'unavailable'
+      }
+
+      const controller = new AbortController()
+      queueContinuationController = controller
+      const task = (async (): Promise<QueueContinuationFetchResult> => {
+        try {
+          const page = await continuationState.continuation.loadNext(controller.signal)
+          if (
+            controller.signal.aborted ||
+            queueContinuation !== continuationState ||
+            queueSource.value !== continuationState.source
+          ) {
+            return 'unavailable'
+          }
+          continuationState.hasMore = page.hasMore
+          const previousLength = queue.value.length
+          if (!appendQueue(page.tracks, continuationState.source)) return 'unavailable'
+          return queue.value.length > previousLength ? 'added' : 'empty'
+        } catch (reason) {
+          if (!isAbort(reason) && reportError) error.value = asError(reason)
+          return 'unavailable'
+        } finally {
+          if (queueContinuationController === controller) queueContinuationController = null
+        }
+      })()
+      queueContinuationTask = task
+      try {
+        return await task
+      } finally {
+        if (queueContinuationTask === task) queueContinuationTask = null
+      }
+    }
+
+    async function ensureQueuedTracksAhead(minimum: number): Promise<boolean> {
+      let emptyPages = 0
+      while (queuedTracksAhead() < minimum) {
+        const result = await fetchQueueContinuationPage(true)
+        if (result === 'unavailable') return queuedTracksAhead() >= minimum
+        if (result === 'added') {
+          emptyPages = 0
+          continue
+        }
+        emptyPages += 1
+        if (emptyPages >= MAX_EMPTY_QUEUE_CONTINUATION_PAGES) return false
+      }
+      return true
+    }
+
+    function scheduleQueueContinuation(): void {
+      const continuationState = queueContinuation
+      if (
+        continuationState === null ||
+        !continuationState.hasMore ||
+        queueSource.value !== continuationState.source ||
+        queuedTracksAhead() >= QUEUE_PREFETCH_AHEAD ||
+        queueContinuationTask !== null ||
+        queueContinuationTimer !== null
+      ) {
+        return
+      }
+      // Starting this after the current interaction lets the current song and
+      // route paint first.  At most one page is requested per scheduling
+      // event, so an all-unplayable collection cannot hydrate indefinitely.
+      queueContinuationTimer = globalThis.setTimeout(() => {
+        queueContinuationTimer = null
+        void fetchQueueContinuationPage()
+      }, 0)
+    }
+
+    function refreshQueueResourceHints(): void {
+      preloadNextCover()
+      scheduleQueueContinuation()
+    }
+
+    function setQueueContinuation(
+      expectedSource: string,
+      continuation: PlayerQueueContinuation,
+    ): boolean {
+      if (queueSource.value !== expectedSource) return false
+      cancelQueueContinuation('Queue continuation replaced')
+      queueContinuation = { source: expectedSource, continuation, hasMore: true }
+      refreshQueueResourceHints()
+      return true
+    }
+
     function setQueue(
       tracks: readonly Track[],
       startIndex = 0,
       source: string | null = null,
     ): void {
       cancelNavigation('Queue replaced')
+      cancelQueueContinuation('Queue replaced')
       queue.value = [...tracks]
+      queuedTrackIds = new Set(queue.value.map(({ id }) => id))
       queueSource.value = source
       currentIndex.value =
         tracks.length === 0 ? -1 : Math.min(Math.max(startIndex, 0), tracks.length - 1)
       playNextQueue.value = []
       currentIsPlayNext = false
+      lastPreloadedCoverKey = ''
       rebuildPlaybackOrder()
+      refreshQueueResourceHints()
     }
 
     function appendQueue(tracks: readonly Track[], expectedSource: string): boolean {
       if (queueSource.value !== expectedSource) return false
       const previousLength = queue.value.length
-      const ids = new Set(queue.value.map(({ id }) => id))
       const additions = tracks.filter((track) => {
-        if (ids.has(track.id)) return false
-        ids.add(track.id)
+        if (queuedTrackIds.has(track.id)) return false
+        queuedTrackIds.add(track.id)
         return true
       })
       if (additions.length > 0) {
@@ -415,6 +576,7 @@ export function createPlayerStore(
             random,
           )
         }
+        refreshQueueResourceHints()
       }
       return true
     }
@@ -460,6 +622,7 @@ export function createPlayerStore(
       return loadResolvedTrack(track, () => {
         currentIndex.value = index
         currentIsPlayNext = false
+        refreshQueueResourceHints()
       })
     }
 
@@ -472,18 +635,21 @@ export function createPlayerStore(
         return false
       }
       playNextQueue.value = [...playNextQueue.value, track]
+      refreshQueueResourceHints()
       return true
     }
 
     function clearPlayNext(): void {
       if (queueBusy.value) return
       playNextQueue.value = []
+      refreshQueueResourceHints()
     }
 
     function removePlayNextAt(index: number): boolean {
       if (queueBusy.value) return false
       if (index < 0 || index >= playNextQueue.value.length) return false
       playNextQueue.value = playNextQueue.value.filter((_, itemIndex) => itemIndex !== index)
+      refreshQueueResourceHints()
       return true
     }
 
@@ -499,6 +665,7 @@ export function createPlayerStore(
         }
         playNextQueue.value = pending
         currentIsPlayNext = true
+        refreshQueueResourceHints()
       })
     }
 
@@ -521,11 +688,18 @@ export function createPlayerStore(
       if (reason === 'ended' && queueBusy.value) return false
       if (reason === 'ended' && repeatMode.value === 'one') return repeatCurrent()
       if (direction === 'next' && playNextQueue.value.length > 0) return playPlayNextAt(0)
+      // Preserve immediate navigation for an already-known next track. Some
+      // transports begin resolving synchronously; only await the continuation
+      // when the queue is genuinely at its known edge.
+      if (direction === 'next' && !currentIsPlayNext && queuedTracksAhead() < 1) {
+        await ensureQueuedTracksAhead(1)
+      }
       if (direction === 'previous' && currentIsPlayNext) {
         const baseTrack = queue.value[currentIndex.value]
         if (!baseTrack?.playable) return false
         return loadResolvedTrack(baseTrack, () => {
           currentIsPlayNext = false
+          refreshQueueResourceHints()
         })
       }
       const index = resolveQueueTrackIndex(
@@ -671,6 +845,7 @@ export function createPlayerStore(
     function toggleShuffle(): void {
       shuffle.value = !shuffle.value
       rebuildPlaybackOrder()
+      refreshQueueResourceHints()
     }
 
     function toggleReversed(): void {
@@ -683,6 +858,7 @@ export function createPlayerStore(
           reversed.value,
         )
       }
+      refreshQueueResourceHints()
     }
 
     function snapshot(): PlayerQueueSnapshot | null {
@@ -756,6 +932,7 @@ export function createPlayerStore(
       persistQueueNow()
       stopQueuePersistence()
       cancelNavigation('Player disposed')
+      cancelQueueContinuation('Player disposed')
       activeLoad.value?.abort('Player disposed')
       activeLoad.value = null
       cancelLike('Player disposed')
@@ -795,6 +972,7 @@ export function createPlayerStore(
       outputDeviceSelectionSupported,
       load,
       setQueue,
+      setQueueContinuation,
       appendQueue,
       playQueueIndex,
       playQueueTrack,

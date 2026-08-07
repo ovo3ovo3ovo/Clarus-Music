@@ -278,6 +278,46 @@ describe('player queue navigation', () => {
     expect(player.upcomingTracks.map(({ id }) => id)).toEqual([3, 4, 2, 6, 5])
   })
 
+  it('loads the next continuation page when playback reaches the known queue edge', async () => {
+    const continuation = {
+      loadNext: vi.fn(async () => ({ tracks: [track(2)], hasMore: false })),
+    }
+    const { player } = setup()
+    await player.load(track(1), { kind: 'remote', url: 'https://a/1' }, false)
+    player.setQueue([track(1)], 0, 'playlist:edge')
+    expect(player.setQueueContinuation('playlist:edge', continuation)).toBe(true)
+
+    await expect(player.next()).resolves.toBe(true)
+    expect(continuation.loadNext).toHaveBeenCalledOnce()
+    expect(player.queue.map(({ id }) => id)).toEqual([1, 2])
+    expect(player.currentTrack?.id).toBe(2)
+  })
+
+  it('does not request a continuation until the ahead window becomes small', async () => {
+    vi.useFakeTimers()
+    const continuation = {
+      loadNext: vi.fn(async () => ({ tracks: [track(14), track(15)], hasMore: false })),
+    }
+    try {
+      const { player } = setup()
+      const knownTracks = Array.from({ length: 13 }, (_, index) => track(index + 1))
+      await player.load(track(1), { kind: 'remote', url: 'https://a/1' }, false)
+      player.setQueue(knownTracks, 0, 'playlist:window')
+      player.setQueueContinuation('playlist:window', continuation)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(continuation.loadNext).not.toHaveBeenCalled()
+
+      await expect(player.next()).resolves.toBe(true)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(continuation.loadNext).toHaveBeenCalledOnce()
+      expect(player.queue.map(({ id }) => id)).toEqual(
+        Array.from({ length: 15 }, (_, index) => index + 1),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reverses the existing shuffle without drawing another order', async () => {
     const { player } = setup()
     await player.load(track(1), { kind: 'remote', url: 'https://a/1' }, false)

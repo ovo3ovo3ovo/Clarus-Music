@@ -161,7 +161,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  reactive,
+  ref,
+  shallowRef,
+  watch,
+} from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/common/AppIcon.vue'
@@ -273,8 +283,9 @@ const createNameInput = ref<HTMLInputElement | null>(null)
 let overviewController: AbortController | null = null
 let tabController: AbortController | null = null
 let playbackController: AbortController | null = null
-let hydrationController: AbortController | null = null
 let createController: AbortController | null = null
+let viewActive = true
+let overviewAuthKey: string | null = null
 
 const user = computed(() => authStore.session.user)
 const authKey = computed(() =>
@@ -322,7 +333,7 @@ function isAbort(reason: unknown): boolean {
 }
 
 async function loadOverview(): Promise<void> {
-  if (authStore.restoring) return
+  if (!viewActive || authStore.restoring) return
   const currentUser = user.value
   if (!currentUser) {
     void router.replace('/login/account')
@@ -337,8 +348,9 @@ async function loadOverview(): Promise<void> {
   operationError.value = null
   try {
     const loaded = await libraryGateway.overview(currentUser.userId, controller.signal)
-    if (overviewController !== controller) return
+    if (overviewController !== controller || !viewActive) return
     overview.value = loaded
+    overviewAuthKey = authKey.value
     playlists.value = loaded.playlists.items
     playlistOffset.value = loaded.playlists.nextOffset
     playlistHasMore.value = loaded.playlists.hasMore
@@ -355,7 +367,7 @@ async function loadOverview(): Promise<void> {
 
 async function loadMorePlaylists(): Promise<void> {
   const currentUser = user.value
-  if (!currentUser || playlistLoading.value || !playlistHasMore.value) return
+  if (!viewActive || !currentUser || playlistLoading.value || !playlistHasMore.value) return
   tabController?.abort('Library playlist page superseded')
   const controller = new AbortController()
   tabController = controller
@@ -367,7 +379,7 @@ async function loadMorePlaylists(): Promise<void> {
       playlistOffset.value,
       controller.signal,
     )
-    if (tabController !== controller) return
+    if (tabController !== controller || !viewActive) return
     playlists.value = appendUniqueItems(playlists.value, page.items)
     playlistOffset.value = page.nextOffset
     playlistHasMore.value = page.hasMore
@@ -382,7 +394,7 @@ async function loadMorePlaylists(): Promise<void> {
 }
 
 async function loadCatalog(section: VisibleCatalogSection, more = false): Promise<void> {
-  if (catalogLoading[section] || (!more && catalogLoaded[section])) return
+  if (!viewActive || catalogLoading[section] || (!more && catalogLoaded[section])) return
   if (more && !catalogHasMore[section]) return
   tabController?.abort('Library catalog page superseded')
   const controller = new AbortController()
@@ -392,7 +404,7 @@ async function loadCatalog(section: VisibleCatalogSection, more = false): Promis
   const offset = more ? catalogOffsets[section] : 0
   try {
     const page = await libraryGateway.catalogPage(section, offset, controller.signal)
-    if (tabController !== controller) return
+    if (tabController !== controller || !viewActive) return
     if (page.section === 'albums') {
       albums.value = more ? appendUniqueItems(albums.value, page.items) : page.items
     } else if (page.section === 'artists') {
@@ -415,7 +427,13 @@ async function loadCatalog(section: VisibleCatalogSection, more = false): Promis
 
 async function loadHistory(): Promise<void> {
   const currentUser = user.value
-  if (!currentUser || historyLoading.value || historyCache.value[historyPeriod.value]) return
+  if (
+    !viewActive ||
+    !currentUser ||
+    historyLoading.value ||
+    historyCache.value[historyPeriod.value]
+  )
+    return
   tabController?.abort('Library history superseded')
   const controller = new AbortController()
   tabController = controller
@@ -424,7 +442,7 @@ async function loadHistory(): Promise<void> {
   const period = historyPeriod.value
   try {
     const history = await libraryGateway.history(currentUser.userId, period, controller.signal)
-    if (tabController !== controller || historyPeriod.value !== period) return
+    if (tabController !== controller || !viewActive || historyPeriod.value !== period) return
     historyCache.value = { ...historyCache.value, [period]: history }
   } catch (reason) {
     if (!isAbort(reason)) historyError.value = message(reason)
@@ -437,6 +455,7 @@ async function loadHistory(): Promise<void> {
 }
 
 function ensureCurrentTab(): void {
+  if (!viewActive) return
   tabController?.abort('Library tab changed')
   if (currentTab.value === 'albums' || currentTab.value === 'artists') {
     void loadCatalog(currentTab.value)
@@ -445,27 +464,22 @@ function ensureCurrentTab(): void {
   }
 }
 
-async function hydratePlaylistQueue(
-  detail: PlaylistDetail,
-  sourceKey: string,
-  controller: AbortController,
-): Promise<void> {
+function configurePlaylistQueueContinuation(detail: PlaylistDetail, sourceKey: string): void {
   let offset = detail.nextOffset
-  while (
-    offset < detail.trackIds.length &&
-    hydrationController === controller &&
-    player.queueSource === sourceKey
-  ) {
-    const ids = detail.trackIds.slice(offset, offset + PLAYLIST_PAGE_SIZE)
-    if (ids.length === 0) break
-    const page = await playlistGateway.trackPage(ids, controller.signal)
-    if (hydrationController !== controller || player.queueSource !== sourceKey) return
-    player.appendQueue(
-      page.tracks.filter((track) => track.playable),
-      sourceKey,
-    )
-    offset += page.requestedCount
-  }
+  player.setQueueContinuation(sourceKey, {
+    async loadNext(signal) {
+      const ids = detail.trackIds.slice(offset, offset + PLAYLIST_PAGE_SIZE)
+      if (ids.length === 0) return { tracks: [], hasMore: false }
+      const page = await playlistGateway.trackPage(ids, signal)
+      // A malformed/empty response must not pin the player in an endless
+      // continuation loop. The requested ID window is still safe to advance.
+      offset = Math.min(detail.trackIds.length, offset + Math.max(page.requestedCount, ids.length))
+      return {
+        tracks: page.tracks.filter((track) => track.playable),
+        hasMore: offset < detail.trackIds.length,
+      }
+    },
+  })
 }
 
 async function playPlaylistDetail(detail: PlaylistDetail, selectedTrackId?: number): Promise<void> {
@@ -475,7 +489,6 @@ async function playPlaylistDetail(detail: PlaylistDetail, selectedTrackId?: numb
     return
   }
   playbackController?.abort('Library playback superseded')
-  hydrationController?.abort('Library queue superseded')
   const controller = new AbortController()
   playbackController = controller
   busyTrackId.value = selection.track.id
@@ -493,11 +506,7 @@ async function playPlaylistDetail(detail: PlaylistDetail, selectedTrackId?: numb
     }
     player.setQueue(selection.queue, selection.index, sourceKey)
     await player.load(selection.track, source, true, controller.signal)
-    const hydration = new AbortController()
-    hydrationController = hydration
-    void hydratePlaylistQueue(detail, sourceKey, hydration).catch((reason: unknown) => {
-      if (!isAbort(reason)) operationError.value = message(reason)
-    })
+    if (player.queueSource === sourceKey) configurePlaylistQueueContinuation(detail, sourceKey)
   } catch (reason) {
     if (!isAbort(reason)) operationError.value = message(reason)
   } finally {
@@ -510,7 +519,6 @@ async function playPlaylistDetail(detail: PlaylistDetail, selectedTrackId?: numb
 
 async function playPlaylistCard(playlist: LibraryPlaylist): Promise<void> {
   playbackController?.abort('Library playlist selection superseded')
-  hydrationController?.abort('Library queue superseded')
   const controller = new AbortController()
   playbackController = controller
   busyPlaylistId.value = playlist.id
@@ -536,7 +544,6 @@ async function playCollectionTrack(
   const selection = selectPlaylistTrack(tracks, track.id)
   if (!selection) return
   playbackController?.abort('Library track selection superseded')
-  hydrationController?.abort('Library collection changed')
   const controller = new AbortController()
   playbackController = controller
   busyTrackId.value = track.id
@@ -612,27 +619,37 @@ watch(createDialogOpen, async (open) => {
   await nextTick()
   createNameInput.value?.focus()
 })
-watch(
-  () => player.queueSource,
-  (source) => {
-    if (
-      hydrationController &&
-      source !== `playlist:${busyPlaylistId.value ?? 0}` &&
-      source !== `library:history:${historyPeriod.value}`
-    ) {
-      hydrationController.abort('Library queue ownership changed')
-      hydrationController = null
-    }
-  },
-)
 
-onBeforeUnmount(() => {
-  overviewController?.abort('Library view disposed')
-  tabController?.abort('Library view disposed')
-  playbackController?.abort('Library view disposed')
-  hydrationController?.abort('Library view disposed')
-  createController?.abort('Library view disposed')
-})
+function suspendCachedView(reason: string): void {
+  viewActive = false
+  overviewController?.abort(reason)
+  overviewController = null
+  tabController?.abort(reason)
+  tabController = null
+  playbackController?.abort(reason)
+  playbackController = null
+  createController?.abort(reason)
+  createController = null
+  overviewLoading.value = false
+  playlistLoading.value = false
+  historyLoading.value = false
+  catalogLoading.albums = false
+  catalogLoading.artists = false
+  createBusy.value = false
+}
+
+function resumeCachedView(): void {
+  viewActive = true
+  if (overview.value === null || overviewAuthKey !== authKey.value) {
+    void loadOverview()
+    return
+  }
+  ensureCurrentTab()
+}
+
+onActivated(resumeCachedView)
+onDeactivated(() => suspendCachedView('Library view hidden'))
+onBeforeUnmount(() => suspendCachedView('Library view disposed'))
 </script>
 
 <style scoped lang="scss">
