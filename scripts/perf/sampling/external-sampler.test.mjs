@@ -94,7 +94,7 @@ function topOutput() {
 }
 
 function attribution() {
-  const mainPath = '/private/release/Clarus Music.app/Contents/MacOS/simplemusic'
+  const mainPath = '/private/release/Clarus Music.app/Contents/MacOS/clarus-music'
   const records = [
     { role: 'main', pid: 4101, start: '1', path: mainPath, realpath: mainPath },
     {
@@ -274,8 +274,8 @@ async function createHarness({
     readBundle: async () => ({
       appBundlePath,
       expectedBundlePath: appBundlePath,
-      executablePath: `${appBundlePath}/Contents/MacOS/simplemusic`,
-      executableRealpath: `${appBundlePath}/Contents/MacOS/simplemusic`,
+      executablePath: `${appBundlePath}/Contents/MacOS/clarus-music`,
+      executableRealpath: `${appBundlePath}/Contents/MacOS/clarus-music`,
       bundleId: 'com.ovo3ovo3ovo.clarusmusic',
       bundleVersion: '0.1.0',
       executableSha256: HASH,

@@ -53,6 +53,10 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    // WKWebView otherwise schedules visual updates near 60fps even on a
+    // ProMotion display. This is a macOS-only no-op elsewhere.
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_plugin_macos_fps::init());
     builder
         .manage(audio_cache::AudioCacheState::default())
         .manage(music_api::MusicApiState::default())

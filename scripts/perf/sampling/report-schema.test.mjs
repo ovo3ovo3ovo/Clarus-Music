@@ -109,7 +109,7 @@ function runReport(overrides = {}) {
       dirty: false,
       appBundlePath: '/private/repo/src-tauri/target/release/bundle/macos/Clarus Music.app',
       appExecutablePath:
-        '/private/repo/src-tauri/target/release/bundle/macos/Clarus Music.app/Contents/MacOS/simplemusic',
+        '/private/repo/src-tauri/target/release/bundle/macos/Clarus Music.app/Contents/MacOS/clarus-music',
       bundleId: 'com.ovo3ovo3ovo.clarusmusic',
       bundleVersion: '0.1.0',
       executableSha256: HASH,

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    simplemusic_lib::run();
+    clarus_music_lib::run();
 }

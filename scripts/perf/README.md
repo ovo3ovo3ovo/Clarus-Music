@@ -67,7 +67,7 @@ The manifest intentionally distinguishes tooling from execution. The current ext
 
 `perf:sample` is non-production, macOS-only measurement infrastructure. It attaches to one already-running **release** bundle; it never launches, controls, signals, instruments, or imports the Clarus Music product. Its output is not evidence of a product performance improvement.
 
-The only supported bundle is the worktree build at `src-tauri/target/release/bundle/macos/Clarus Music.app`. The bundle must be a real, non-symlink `.app` with bundle identifier `com.ovo3ovo3ovo.clarusmusic`; its executable is read from `Contents/Info.plist` (currently `simplemusic`). Do not point it at an installed `/Applications` copy.
+The only supported bundle is the worktree build at `src-tauri/target/release/bundle/macos/Clarus Music.app`. The bundle must be a real, non-symlink `.app` with bundle identifier `com.ovo3ovo3ovo.clarusmusic`; its executable is read from `Contents/Info.plist` (currently `clarus-music`). Do not point it at an installed `/Applications` copy.
 
 ```sh
 npm run perf:sample -- \

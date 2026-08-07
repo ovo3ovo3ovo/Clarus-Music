@@ -17,7 +17,7 @@ import {
 
 const BUNDLE =
   '/private/tmp/clarus music performance/src-tauri/target/release/bundle/macos/Clarus Music.app'
-const EXECUTABLE = `${BUNDLE}/Contents/MacOS/simplemusic`
+const EXECUTABLE = `${BUNDLE}/Contents/MacOS/clarus-music`
 const COALITION = { id: '17', asn: '0x40000017' }
 
 function processRecord({ pid, ppid = 1, start = `start-${pid}`, path, realpath = path }) {
@@ -39,7 +39,7 @@ function fixture({ withOtherInstance = true } = {}) {
   })
   const other = processRecord({
     pid: 5101,
-    path: '/Applications/Clarus Music.app/Contents/MacOS/simplemusic',
+    path: '/Applications/Clarus Music.app/Contents/MacOS/clarus-music',
   })
   const snapshot = [root, web, gpu, networking, unknown, ...(withOtherInstance ? [other] : [])]
   const applications = [
@@ -150,8 +150,8 @@ test('rejects old installed bundles and non-release bundle descriptors before at
       assertExpectedReleaseBundle({
         ...state.bundle,
         appBundlePath: '/Applications/Clarus Music.app',
-        executablePath: '/Applications/Clarus Music.app/Contents/MacOS/simplemusic',
-        executableRealpath: '/Applications/Clarus Music.app/Contents/MacOS/simplemusic',
+        executablePath: '/Applications/Clarus Music.app/Contents/MacOS/clarus-music',
+        executableRealpath: '/Applications/Clarus Music.app/Contents/MacOS/clarus-music',
       }),
     /release bundle path/i,
   )
@@ -169,8 +169,8 @@ test('readReleaseBundle accepts a real release bundle through a /tmp prefix alia
   const aliasBundle = '/tmp/clarus-worktree/src-tauri/target/release/bundle/macos/Clarus Music.app'
   const expectedBundle =
     '/private/tmp/clarus-worktree/src-tauri/target/release/bundle/macos/Clarus Music.app'
-  const aliasExecutable = `${aliasBundle}/Contents/MacOS/simplemusic`
-  const expectedExecutable = `${expectedBundle}/Contents/MacOS/simplemusic`
+  const aliasExecutable = `${aliasBundle}/Contents/MacOS/clarus-music`
+  const expectedExecutable = `${expectedBundle}/Contents/MacOS/clarus-music`
   const directory = { isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false }
   const file = { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false }
   const filesystem = {
@@ -192,7 +192,7 @@ test('readReleaseBundle accepts a real release bundle through a /tmp prefix alia
   const runCommand = async (_executable, argv) => {
     const value = {
       CFBundleIdentifier: EXPECTED_BUNDLE_ID,
-      CFBundleExecutable: 'simplemusic',
+      CFBundleExecutable: 'clarus-music',
       CFBundleShortVersionString: '0.1.0',
     }[argv[1]]
     return { stdout: value }
@@ -310,11 +310,11 @@ executable path="${EXECUTABLE}"
 ASN: 0x40000099
 pid=5101
 bundleID="com.ovo3ovo3ovo.clarusmusic"
-executable path="/Applications/Clarus Music.app/Contents/MacOS/simplemusic"
+executable path="/Applications/Clarus Music.app/Contents/MacOS/clarus-music"
 `)
   assert.equal(records.length, 2)
   assert.deepEqual(records[0].coalition, { id: 'asn:0x40000017', asn: '0x40000017' })
-  assert.equal(records[1].path, '/Applications/Clarus Music.app/Contents/MacOS/simplemusic')
+  assert.equal(records[1].path, '/Applications/Clarus Music.app/Contents/MacOS/clarus-music')
 })
 
 test('accepts launchd PID 1 in a process snapshot while keeping attribution roots above one', () => {
@@ -330,7 +330,7 @@ test('accepts launchd PID 1 in a process snapshot while keeping attribution root
 
 test('parses macOS lsappinfo list blocks by executable path and coalition', () => {
   const realExecutable =
-    '/private/tmp/clarus-music-performance-phase-1/src-tauri/target/release/bundle/macos/Clarus Music.app/Contents/MacOS/simplemusic'
+    '/private/tmp/clarus-music-performance-phase-1/src-tauri/target/release/bundle/macos/Clarus Music.app/Contents/MacOS/clarus-music'
   const records = parseLsappinfoApplications(`
 96) "Clarus Music" ASN:0x0-0x90a90a:
     bundleID="com.ovo3ovo3ovo.clarusmusic"
@@ -372,7 +372,7 @@ test('parses macOS lsappinfo list blocks by executable path and coalition', () =
 
 test('parses a real lsappinfo info record using executable path rather than bundle path', () => {
   const realExecutable =
-    '/private/tmp/clarus-music-performance-phase-1/src-tauri/target/release/bundle/macos/Clarus Music.app/Contents/MacOS/simplemusic'
+    '/private/tmp/clarus-music-performance-phase-1/src-tauri/target/release/bundle/macos/Clarus Music.app/Contents/MacOS/clarus-music'
   const record = parseLsappinfoInfo(`
 "Clarus Music" ASN:0x0-0x90a90a:
     bundleID="com.ovo3ovo3ovo.clarusmusic"

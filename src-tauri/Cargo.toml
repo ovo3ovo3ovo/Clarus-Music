@@ -1,5 +1,5 @@
 [package]
-name = "simplemusic"
+name = "clarus-music"
 version = "0.1.0"
 description = "A performance-first desktop music player"
 authors = ["Clarus Music contributors"]
@@ -11,7 +11,7 @@ rust-version = "1.88.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "simplemusic_lib"
+name = "clarus_music_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -48,6 +48,7 @@ tauri-plugin-global-shortcut = "2.3.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSButtonTouchBarItem", "NSResponder", "NSTouchBar", "NSTouchBarItem", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSSet", "NSString", "std"] }
+tauri-plugin-macos-fps = "0.1"
 
 [dev-dependencies]
 tempfile = "3.27"

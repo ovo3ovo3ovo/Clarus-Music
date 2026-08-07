@@ -1025,7 +1025,7 @@ function failureSource(state) {
     gitCommit: FAILURE_COMMIT,
     dirty: false,
     appBundlePath: bundlePath,
-    appExecutablePath: join(bundlePath, 'Contents', 'MacOS', 'simplemusic'),
+    appExecutablePath: join(bundlePath, 'Contents', 'MacOS', 'clarus-music'),
     bundleId: FAILURE_BUNDLE_ID,
     bundleVersion: 'unavailable',
     executableSha256: FAILURE_HASH,

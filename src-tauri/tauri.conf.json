@@ -32,6 +32,11 @@
       }
     }
   },
+  "plugins": {
+    "macos-fps": {
+      "enabled": true
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],

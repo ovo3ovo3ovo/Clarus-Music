@@ -624,6 +624,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "clarus-music"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "atomic-write-file",
+ "bytes",
+ "futures-util",
+ "keyring",
+ "log",
+ "md-5",
+ "ncm-api-rs",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-log",
+ "tauri-plugin-macos-fps",
+ "tempfile",
+ "tokio",
+ "unm_engine",
+ "unm_engine_kugou",
+ "unm_engine_ytdl",
+ "unm_request",
+ "unm_types",
+ "zeroize",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4263,40 +4298,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
-name = "simplemusic"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "atomic-write-file",
- "bytes",
- "futures-util",
- "keyring",
- "log",
- "md-5",
- "ncm-api-rs",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-log",
- "tempfile",
- "tokio",
- "unm_engine",
- "unm_engine_kugou",
- "unm_engine_ytdl",
- "unm_request",
- "unm_types",
- "zeroize",
-]
-
-[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4771,6 +4772,19 @@ dependencies = [
  "tauri-plugin",
  "thiserror 2.0.19",
  "time",
+]
+
+[[package]]
+name = "tauri-plugin-macos-fps"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11177f7c97f1322fbcb5d966ebb0378e411145d65f3f2a2f897d8389ebdba583"
+dependencies = [
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "serde",
+ "tauri",
 ]
 
 [[package]]
