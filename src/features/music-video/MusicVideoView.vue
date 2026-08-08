@@ -6,8 +6,8 @@
       <button type="button" @click="loadDetail">{{ t('musicVideo.retry') }}</button>
     </div>
 
-    <div v-show="detail" class="video-shell">
-      <video ref="videoElement" class="plyr" playsinline></video>
+    <div v-show="detail" ref="videoShell" class="video-shell">
+      <video ref="videoElement" class="plyr" playsinline preload="metadata"></video>
     </div>
 
     <template v-if="detail && !loading && !loadError">
@@ -94,6 +94,7 @@ const audioPlayer = usePlayerStore()
 const gateway = new NativeMusicVideoGateway()
 const detail = shallowRef<MusicVideoDetail | null>(null)
 const videoElement = ref<globalThis.HTMLVideoElement | null>(null)
+const videoShell = ref<globalThis.HTMLElement | null>(null)
 const menuRoot = ref<globalThis.HTMLElement | null>(null)
 const loading = ref(false)
 const subscriptionBusy = ref(false)
@@ -138,7 +139,11 @@ function ensurePlyrStyles(): void {
  */
 function releaseVideoResources(): void {
   videoPlayer?.stop()
-  const element = videoElement.value
+  // Plyr replaces the original Vue-owned <video> node on every source
+  // change. Always resolve the live node from the stable shell; clearing the
+  // stale ref would leave the active decoder and its GPU frames untouched.
+  const element =
+    videoShell.value?.querySelector<globalThis.HTMLVideoElement>('video') ?? videoElement.value
   if (element === null) return
   element.pause()
   element.removeAttribute('src')
@@ -166,6 +171,18 @@ function applyVideoSource(current: MusicVideoDetail): void {
       size: source.resolution,
     })),
   }
+  // Plyr's default blankVideo points at a remote MP4 and is loaded on every
+  // source swap. Use an empty source and re-apply metadata-only preload after
+  // Plyr recreates its native media element.
+  const media =
+    videoShell.value?.querySelector<globalThis.HTMLVideoElement>('video') ?? videoElement.value
+  if (media) {
+    media.preload = autoplay.value ? 'auto' : 'metadata'
+    media.load()
+  }
+  // Keep the common click-and-browse path on a smaller decoder. The quality
+  // menu still exposes 1080p when the user explicitly chooses it.
+  videoPlayer.quality = 720
 }
 
 async function loadDetail(): Promise<void> {
@@ -272,11 +289,13 @@ watch(videoId, () => void loadDetail(), { immediate: true })
 onMounted(() => {
   ensurePlyrStyles()
   if (videoElement.value) {
-    videoPlayer = new Plyr(videoElement.value, {
+    const options = {
       settings: ['quality'],
       autoplay: autoplay.value,
-      quality: { default: 1080, options: [1080, 720, 480, 240] },
-    })
+      blankVideo: '',
+      quality: { default: 720, options: [1080, 720, 480, 240] },
+    } as unknown as ConstructorParameters<typeof Plyr>[1]
+    videoPlayer = new Plyr(videoElement.value, options)
     videoPlayer.volume = audioPlayer.volume
     videoPlayer.on('playing', pauseAudioOnVideoPlayback)
     videoPlayer.on('error', () => {

@@ -22,6 +22,8 @@ import {
 } from 'vue'
 import {
   coverImageCandidates,
+  coverImageUrl,
+  registerCoverImageBudget,
   type CoverImageOptions,
   type CoverImageRole,
 } from '@/platform/cover-image'
@@ -91,6 +93,7 @@ const documentVisible = ref(
 const withinViewportBudget = ref(!props.viewportUnload)
 let observer: globalThis.IntersectionObserver | null = null
 let unsubscribeVisibility: (() => void) | null = null
+let budgetHandle: ReturnType<typeof registerCoverImageBudget> | null = null
 
 const canRenderSource = computed(
   () => pageActive.value && documentVisible.value && withinViewportBudget.value,
@@ -140,6 +143,17 @@ function handleError(): void {
 
 function handleLoad(): void {
   retryAttempt.value = 0
+  const element = imageElement.value
+  if (
+    element === null ||
+    element.getAttribute('src') === EMPTY_COVER_SRC ||
+    !canRenderSource.value
+  ) {
+    budgetHandle?.markDecoded(false)
+    return
+  }
+  budgetHandle?.markDecoded(true)
+  budgetHandle?.touch()
 }
 
 function disconnectObserver(): void {
@@ -156,7 +170,17 @@ function disconnectObserver(): void {
 function detachDecodedImage(): void {
   const element = imageElement.value
   if (element === null) return
+  budgetHandle?.markDecoded(false)
   element.src = EMPTY_COVER_SRC
+}
+
+function canReleaseFromBudget(): boolean {
+  return Boolean(
+    props.viewportUnload &&
+    pageActive.value &&
+    documentVisible.value &&
+    !withinViewportBudget.value,
+  )
 }
 
 function handleDocumentVisibilityChange(): void {
@@ -164,6 +188,7 @@ function handleDocumentVisibilityChange(): void {
   documentVisible.value = visible
   if (!visible) {
     disconnectObserver()
+    budgetHandle?.setUnloadable(false)
     detachDecodedImage()
     return
   }
@@ -190,6 +215,7 @@ function observeViewport(): void {
   disconnectObserver()
   if (!props.viewportUnload || !pageActive.value) {
     withinViewportBudget.value = true
+    budgetHandle?.setUnloadable(canReleaseFromBudget())
     return
   }
 
@@ -200,14 +226,19 @@ function observeViewport(): void {
     // Older WebKit builds should retain the existing eager behaviour rather
     // than ever leaving a visible cover blank.
     withinViewportBudget.value = true
+    budgetHandle?.setUnloadable(canReleaseFromBudget())
     return
   }
 
   withinViewportBudget.value = isNearViewport(element, root)
+  budgetHandle?.setUnloadable(canReleaseFromBudget())
   observer = new globalThis.IntersectionObserver(
     (entries) => {
       const entry = entries[0]
-      if (entry) withinViewportBudget.value = entry.isIntersecting
+      if (!entry) return
+      withinViewportBudget.value = entry.isIntersecting
+      budgetHandle?.setUnloadable(canReleaseFromBudget())
+      if (entry.isIntersecting) budgetHandle?.touch()
     },
     // Keep one half-screen of look-ahead so scrolling remains eager without
     // decoding every card in a long, non-virtualized grid.
@@ -239,6 +270,7 @@ watch(
     // explicit release point.  This matters when a single CoverImage instance
     // is reused for successive route IDs or tracks.
     detachDecodedImage()
+    budgetHandle?.touch()
     reset()
   },
   { flush: 'sync' },
@@ -249,22 +281,44 @@ watch(
 )
 
 onMounted(() => {
+  budgetHandle = registerCoverImageBudget(() => {
+    const request = coverImageUrl(
+      props.source,
+      props.width,
+      props.height ?? props.width,
+      effectiveOptions.value,
+    )
+    if (!request) return 0
+    try {
+      const url = new URL(request)
+      const value = url.searchParams.get('param')?.match(/^(\d+)y(\d+)$/)
+      if (value) return Number(value[1]) * Number(value[2]) * 4
+    } catch {
+      // Fall through to the CSS dimensions for non-URL source strings.
+    }
+    return Math.max(1, props.width) * Math.max(1, props.height ?? props.width) * 4
+  }, detachDecodedImage)
+  budgetHandle.setUnloadable(canReleaseFromBudget())
   unsubscribeVisibility = subscribeDocumentVisibility(handleDocumentVisibilityChange)
   void refreshViewportObservation()
 })
 onActivated(() => {
   pageActive.value = true
+  budgetHandle?.setUnloadable(canReleaseFromBudget())
   void refreshViewportObservation()
 })
 onDeactivated(() => {
   pageActive.value = false
   withinViewportBudget.value = false
+  budgetHandle?.setUnloadable(false)
   disconnectObserver()
   detachDecodedImage()
 })
 onBeforeUnmount(() => {
   disconnectObserver()
   detachDecodedImage()
+  budgetHandle?.dispose()
+  budgetHandle = null
   unsubscribeVisibility?.()
   unsubscribeVisibility = null
 })

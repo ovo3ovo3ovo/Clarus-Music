@@ -6,6 +6,8 @@ import MusicVideoView from './MusicVideoView.vue'
 
 interface MockPlayer {
   source: unknown
+  readonly media: HTMLVideoElement
+  readonly options: unknown
   autoplay: boolean
   volume: number
   readonly events: Map<string, () => void>
@@ -26,15 +28,32 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('plyr', () => ({
   default: class implements MockPlayer {
-    source: unknown = null
+    private sourceValue: unknown = null
+    media: HTMLVideoElement
+    readonly options: unknown
     autoplay = false
     volume = 1
     readonly events = new Map<string, () => void>()
     readonly stop = vi.fn()
     readonly destroy = vi.fn()
 
-    constructor() {
+    constructor(target: HTMLElement, options: unknown) {
+      this.media = target as HTMLVideoElement
+      this.options = options
       mocks.players.push(this)
+    }
+
+    get source(): unknown {
+      return this.sourceValue
+    }
+
+    set source(value: unknown) {
+      this.sourceValue = value
+      // Plyr replaces its native node during a source change. This fake keeps
+      // that lifecycle visible to the view regression test.
+      const replacement = document.createElement('video')
+      this.media.replaceWith(replacement)
+      this.media = replacement
     }
 
     on(event: string, callback: () => void): void {
@@ -102,6 +121,10 @@ describe('MusicVideoView', () => {
 
   it('owns one Plyr instance across routes and pauses audio when video plays', async () => {
     const nativeLoad = vi.spyOn(HTMLMediaElement.prototype, 'load')
+    const loadedElements: HTMLMediaElement[] = []
+    nativeLoad.mockImplementation(function (this: HTMLMediaElement) {
+      loadedElements.push(this)
+    })
     mocks.detail.mockImplementation(async (videoId: number) => detail(videoId))
     const router = createRouter({
       history: createMemoryHistory(),
@@ -137,6 +160,7 @@ describe('MusicVideoView', () => {
     document.body.append(root)
     const app = createApp(MusicVideoView).use(router).use(i18n)
     app.mount(root)
+    const originalElement = root.querySelector<HTMLVideoElement>('video')
     await flushView()
 
     expect(mocks.players).toHaveLength(1)
@@ -146,6 +170,8 @@ describe('MusicVideoView', () => {
       title: 'MV 10',
       sources: [{ size: 1080 }, { size: 720 }],
     })
+    expect(player.options).toMatchObject({ blankVideo: '', quality: { default: 720 } })
+    expect(root.querySelector<HTMLVideoElement>('video')?.preload).toBe('metadata')
 
     mocks.audio.playing = true
     player.events.get('playing')?.()
@@ -156,12 +182,14 @@ describe('MusicVideoView', () => {
     await flushView()
     expect(mocks.players).toHaveLength(1)
     expect(player.stop).toHaveBeenCalledOnce()
-    expect(nativeLoad).toHaveBeenCalledOnce()
+    expect(nativeLoad).toHaveBeenCalledTimes(3)
+    expect(loadedElements).not.toContain(originalElement)
+    expect(root.querySelector<HTMLVideoElement>('video')?.preload).toBe('auto')
     expect(player.autoplay).toBe(true)
     expect(player.source).toMatchObject({ title: 'MV 11' })
 
     app.unmount()
     expect(player.destroy).toHaveBeenCalledOnce()
-    expect(nativeLoad).toHaveBeenCalledTimes(2)
+    expect(nativeLoad).toHaveBeenCalledTimes(4)
   })
 })

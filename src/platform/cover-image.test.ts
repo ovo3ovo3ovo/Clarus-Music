@@ -65,6 +65,17 @@ describe('coverImageUrl', () => {
     ).toBe('https://img.test/video.jpg?param=960y538')
   })
 
+  it('keeps video-card thumbnails smaller than full player posters', async () => {
+    const { coverImageUrl } = await freshCoverImageModule()
+
+    expect(
+      coverImageUrl('https://img.test/video.jpg', 464, 260, {
+        role: 'video-card',
+        pixelRatio: 2,
+      }),
+    ).toBe('https://img.test/video.jpg?param=640y359')
+  })
+
   it('can request an exact cacheable media artwork size', async () => {
     const { coverImageUrl } = await freshCoverImageModule()
 
@@ -176,5 +187,27 @@ describe('cover image preloading', () => {
       vi.unstubAllGlobals()
       vi.useRealTimers()
     }
+  })
+})
+
+describe('decoded cover budget', () => {
+  it('evicts the oldest unloadable decoded cover when the budget is exceeded', async () => {
+    const { COVER_IMAGE_DECODE_BUDGET_BYTES, registerCoverImageBudget } =
+      await freshCoverImageModule()
+    const firstRelease = vi.fn()
+    const secondRelease = vi.fn()
+    const estimatedBytes = COVER_IMAGE_DECODE_BUDGET_BYTES * 0.75
+    const first = registerCoverImageBudget(() => estimatedBytes, firstRelease)
+    const second = registerCoverImageBudget(() => estimatedBytes, secondRelease)
+    first.setUnloadable(true)
+    second.setUnloadable(true)
+    first.markDecoded(true)
+    second.markDecoded(true)
+
+    expect(firstRelease).toHaveBeenCalledOnce()
+    expect(secondRelease).not.toHaveBeenCalled()
+
+    first.dispose()
+    second.dispose()
   })
 })

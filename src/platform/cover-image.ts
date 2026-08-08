@@ -5,7 +5,15 @@
  * as a detail image.
  */
 export type CoverImageRole =
-  'row' | 'avatar' | 'player' | 'card' | 'hero' | 'immersive' | 'media-session' | 'video'
+  | 'row'
+  | 'avatar'
+  | 'player'
+  | 'card'
+  | 'hero'
+  | 'immersive'
+  | 'media-session'
+  | 'video-card'
+  | 'video'
 
 export interface CoverImageOptions {
   readonly exact?: boolean
@@ -59,6 +67,10 @@ export const COVER_IMAGE_POLICIES: Readonly<Record<CoverImageRole, CoverImagePol
   // for every track transition.
   immersive: { minWidth: 512, maxWidth: 1024 },
   'media-session': { minWidth: 256, maxWidth: 512 },
+  // Video cards are dense thumbnails, not the full player poster. Keep the
+  // decoded bitmap below one megapixel even on a 2x display; the player keeps
+  // the separate `video` policy for its larger poster.
+  'video-card': { minWidth: 320, maxWidth: 640 },
   video: { minWidth: 320, maxWidth: 960 },
 }
 
@@ -72,6 +84,110 @@ const MAX_REMEMBERED_PRELOADS = 16
 const MAX_REMEMBERED_PRELOAD_BYTES = 2 * 1024 * 1024
 const PRELOAD_TIMEOUT_MS = 8_000
 const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='
+
+/**
+ * A decoded image is much larger than its HTTP response. Keep the estimated
+ * live backing stores for viewport-managed covers bounded as a group. This is
+ * deliberately an estimate: WebKit owns the actual decoded-image cache, but
+ * a deterministic release point prevents a long scroll from retaining every
+ * card that has ever entered the look-ahead window.
+ */
+export const COVER_IMAGE_DECODE_BUDGET_BYTES = 32 * 1024 * 1024
+
+interface CoverImageBudgetEntry {
+  readonly estimatedBytes: () => number
+  readonly release: () => void
+  decoded: boolean
+  accountedBytes: number
+  unloadable: boolean
+  lastTouched: number
+  releasing: boolean
+}
+
+export interface CoverImageBudgetHandle {
+  markDecoded(decoded: boolean): void
+  setUnloadable(unloadable: boolean): void
+  touch(): void
+  dispose(): void
+}
+
+const decodedCoverEntries = new Set<CoverImageBudgetEntry>()
+let decodedCoverBytes = 0
+let coverTouchSequence = 0
+
+function estimatedEntryBytes(entry: CoverImageBudgetEntry): number {
+  const bytes = entry.estimatedBytes()
+  return Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes) : 0
+}
+
+function enforceCoverImageBudget(): void {
+  while (decodedCoverBytes > COVER_IMAGE_DECODE_BUDGET_BYTES) {
+    const candidate = [...decodedCoverEntries]
+      .filter((entry) => entry.decoded && entry.unloadable && !entry.releasing)
+      .sort((left, right) => left.lastTouched - right.lastTouched)[0]
+    if (candidate === undefined) return
+    candidate.releasing = true
+    try {
+      candidate.release()
+    } finally {
+      candidate.releasing = false
+    }
+    // A defensive decrement keeps a faulty consumer from spinning forever;
+    // normal CoverImage releases call markDecoded(false) synchronously.
+    if (candidate.decoded) {
+      candidate.decoded = false
+      decodedCoverBytes = Math.max(0, decodedCoverBytes - candidate.accountedBytes)
+      candidate.accountedBytes = 0
+    }
+  }
+}
+
+export function registerCoverImageBudget(
+  estimatedBytes: () => number,
+  release: () => void,
+): CoverImageBudgetHandle {
+  const entry: CoverImageBudgetEntry = {
+    estimatedBytes,
+    release,
+    decoded: false,
+    accountedBytes: 0,
+    unloadable: false,
+    lastTouched: ++coverTouchSequence,
+    releasing: false,
+  }
+  decodedCoverEntries.add(entry)
+
+  return {
+    markDecoded(decoded) {
+      if (entry.decoded === decoded) return
+      if (decoded) {
+        entry.decoded = true
+        entry.accountedBytes = estimatedEntryBytes(entry)
+        decodedCoverBytes += entry.accountedBytes
+      } else {
+        entry.decoded = false
+        decodedCoverBytes = Math.max(0, decodedCoverBytes - entry.accountedBytes)
+        entry.accountedBytes = 0
+      }
+      enforceCoverImageBudget()
+    },
+    setUnloadable(unloadable) {
+      entry.unloadable = unloadable
+      enforceCoverImageBudget()
+    },
+    touch() {
+      entry.lastTouched = ++coverTouchSequence
+    },
+    dispose() {
+      if (!decodedCoverEntries.delete(entry)) return
+      if (entry.decoded) {
+        decodedCoverBytes = Math.max(0, decodedCoverBytes - entry.accountedBytes)
+        entry.decoded = false
+        entry.accountedBytes = 0
+      }
+    },
+  }
+}
 
 const prefetchedUrls = new Map<string, PreloadRequest>()
 const activePreloads = new Map<HTMLImageElement, PreloadRequest>()
