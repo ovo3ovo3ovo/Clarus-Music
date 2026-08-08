@@ -30,6 +30,29 @@ defineOptions({ inheritAttrs: false })
 
 const EMPTY_COVER_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='
 
+type VisibilitySubscriber = () => void
+const visibilitySubscribers = new Set<VisibilitySubscriber>()
+let visibilityListenerInstalled = false
+
+function dispatchDocumentVisibility(): void {
+  for (const subscriber of visibilitySubscribers) subscriber()
+}
+
+function subscribeDocumentVisibility(subscriber: VisibilitySubscriber): () => void {
+  visibilitySubscribers.add(subscriber)
+  if (!visibilityListenerInstalled) {
+    globalThis.document.addEventListener('visibilitychange', dispatchDocumentVisibility)
+    visibilityListenerInstalled = true
+  }
+  return () => {
+    visibilitySubscribers.delete(subscriber)
+    if (visibilitySubscribers.size === 0 && visibilityListenerInstalled) {
+      globalThis.document.removeEventListener('visibilitychange', dispatchDocumentVisibility)
+      visibilityListenerInstalled = false
+    }
+  }
+}
+
 const props = defineProps<{
   source: string
   width: number
@@ -62,10 +85,16 @@ const retryBudget = ref(1)
 const failed = ref(false)
 const retryAttempt = ref(0)
 const pageActive = ref(true)
+const documentVisible = ref(
+  typeof globalThis.document === 'undefined' || globalThis.document.visibilityState !== 'hidden',
+)
 const withinViewportBudget = ref(!props.viewportUnload)
 let observer: globalThis.IntersectionObserver | null = null
+let unsubscribeVisibility: (() => void) | null = null
 
-const canRenderSource = computed(() => pageActive.value && withinViewportBudget.value)
+const canRenderSource = computed(
+  () => pageActive.value && documentVisible.value && withinViewportBudget.value,
+)
 const currentSource = computed(() => {
   if (!canRenderSource.value) return EMPTY_COVER_SRC
   const candidate = candidates.value[candidateIndex.value]
@@ -118,6 +147,29 @@ function disconnectObserver(): void {
   observer = null
 }
 
+/**
+ * WKWebView keeps decoded remote images in compositor memory longer than the
+ * element's Vue lifetime. Clearing the element synchronously gives its image
+ * and GPU backing store a release point when a detail page is discarded or a
+ * kept-alive page leaves the screen.
+ */
+function detachDecodedImage(): void {
+  const element = imageElement.value
+  if (element === null) return
+  element.src = EMPTY_COVER_SRC
+}
+
+function handleDocumentVisibilityChange(): void {
+  const visible = globalThis.document.visibilityState !== 'hidden'
+  documentVisible.value = visible
+  if (!visible) {
+    disconnectObserver()
+    detachDecodedImage()
+    return
+  }
+  void refreshViewportObservation()
+}
+
 function resolveScrollRoot(element: globalThis.HTMLImageElement): globalThis.Element | null {
   return element.closest('.app-content')
 }
@@ -157,7 +209,9 @@ function observeViewport(): void {
       const entry = entries[0]
       if (entry) withinViewportBudget.value = entry.isIntersecting
     },
-    { root, rootMargin: '100% 0px', threshold: 0 },
+    // Keep one half-screen of look-ahead so scrolling remains eager without
+    // decoding every card in a long, non-virtualized grid.
+    { root, rootMargin: '50% 0px', threshold: 0 },
   )
   observer.observe(element)
 }
@@ -173,29 +227,45 @@ watch(
     () => props.width,
     () => props.height,
     () => props.role,
+    () => props.options?.allowOriginalFallback,
     () => props.options?.exact,
     () => props.options?.maxWidth,
     () => props.options?.minWidth,
     () => props.options?.pixelRatio,
     () => props.options?.role,
   ],
-  reset,
+  () => {
+    // Replace the old source only after its decoded backing store has an
+    // explicit release point.  This matters when a single CoverImage instance
+    // is reused for successive route IDs or tracks.
+    detachDecodedImage()
+    reset()
+  },
+  { flush: 'sync' },
 )
 watch(
   () => props.viewportUnload,
   () => void refreshViewportObservation(),
 )
 
-onMounted(() => void refreshViewportObservation())
+onMounted(() => {
+  unsubscribeVisibility = subscribeDocumentVisibility(handleDocumentVisibilityChange)
+  void refreshViewportObservation()
+})
 onActivated(() => {
   pageActive.value = true
   void refreshViewportObservation()
 })
 onDeactivated(() => {
-  if (!props.viewportUnload) return
   pageActive.value = false
   withinViewportBudget.value = false
   disconnectObserver()
+  detachDecodedImage()
 })
-onBeforeUnmount(disconnectObserver)
+onBeforeUnmount(() => {
+  disconnectObserver()
+  detachDecodedImage()
+  unsubscribeVisibility?.()
+  unsubscribeVisibility = null
+})
 </script>

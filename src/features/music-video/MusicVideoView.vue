@@ -130,6 +130,26 @@ function ensurePlyrStyles(): void {
   document.head.append(style)
 }
 
+/**
+ * Plyr's stop() pauses playback but WebKit may retain the native video's
+ * demuxer, decoded frames, and poster backing store.  Explicitly resetting
+ * the underlying element before changing routes or sources prevents a run of
+ * clicked music videos from accumulating GPU memory in WebContent.
+ */
+function releaseVideoResources(): void {
+  videoPlayer?.stop()
+  const element = videoElement.value
+  if (element === null) return
+  element.pause()
+  element.removeAttribute('src')
+  element.removeAttribute('poster')
+  element.srcObject = null
+  for (const source of element.querySelectorAll('source')) source.remove()
+  // Calling load() after source removal is the browser-supported way to
+  // discard media buffers and transition the element back to NETWORK_EMPTY.
+  element.load()
+}
+
 function applyVideoSource(current: MusicVideoDetail): void {
   if (!videoPlayer) return
   videoPlayer.autoplay = autoplay.value
@@ -156,7 +176,7 @@ async function loadDetail(): Promise<void> {
   detailController = null
   subscriptionController = null
   subscriptionBusy.value = false
-  videoPlayer?.stop()
+  releaseVideoResources()
   detail.value = null
   loadError.value = null
   operationError.value = null
@@ -272,6 +292,7 @@ onBeforeUnmount(() => {
   subscriptionController?.abort('Music video view disposed')
   document.removeEventListener('pointerdown', closeMenuOnOutsideClick)
   document.removeEventListener('keydown', closeMenuOnEscape)
+  releaseVideoResources()
   videoPlayer?.destroy()
   videoPlayer = null
 })

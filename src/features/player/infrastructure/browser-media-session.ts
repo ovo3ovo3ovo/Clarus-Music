@@ -129,6 +129,10 @@ export function createBrowserMediaSession(
         return
       }
       try {
+        // WebKit may keep the previous artwork URL alive while a new
+        // MediaMetadata object is assigned. Clearing first gives the native
+        // media-session bridge an explicit release point between tracks.
+        clearMetadata()
         activeSession.metadata = new Metadata({
           title: track.name,
           artist: track.artists.map(({ name }) => name).join(', '),

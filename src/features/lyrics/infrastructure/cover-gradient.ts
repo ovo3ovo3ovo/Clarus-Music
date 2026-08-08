@@ -1,5 +1,7 @@
 import { gradientFromRgba } from '../domain/cover-gradient'
 
+const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='
+
 function abortError(reason?: unknown): DOMException {
   return new DOMException(String(reason ?? 'Cover color extraction aborted'), 'AbortError')
 }
@@ -15,7 +17,7 @@ function loadImage(url: string, signal: AbortSignal): Promise<HTMLImageElement> 
     }
     const handleAbort = () => {
       cleanup()
-      image.src = ''
+      image.src = EMPTY_IMAGE_SRC
       reject(abortError(signal.reason))
     }
     image.onload = () => {
@@ -38,8 +40,9 @@ export async function extractCoverGradient(
   const response = await fetch(coverUrl, { cache: 'force-cache', signal })
   if (!response.ok) throw new Error(`Unable to load the cover art (${response.status})`)
   const objectUrl = URL.createObjectURL(await response.blob())
+  let image: HTMLImageElement | null = null
   try {
-    const image = await loadImage(objectUrl, signal)
+    image = await loadImage(objectUrl, signal)
     if (signal.aborted) throw abortError(signal.reason)
     const canvas = document.createElement('canvas')
     canvas.width = 16
@@ -49,6 +52,15 @@ export async function extractCoverGradient(
     context.drawImage(image, 0, 0, canvas.width, canvas.height)
     return gradientFromRgba(context.getImageData(0, 0, canvas.width, canvas.height).data)
   } finally {
+    // The gradient only needs the 16×16 pixels copied into the canvas. Clear
+    // the temporary decoder immediately so switching tracks does not leave a
+    // decoded image (and its compositor backing store) attached to a detached
+    // Image object in WKWebView.
+    if (image !== null) {
+      image.onload = null
+      image.onerror = null
+      image.src = EMPTY_IMAGE_SRC
+    }
     URL.revokeObjectURL(objectUrl)
   }
 }

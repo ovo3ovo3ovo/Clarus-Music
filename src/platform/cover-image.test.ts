@@ -53,7 +53,7 @@ describe('coverImageUrl', () => {
       'https://img.test/cover.jpg?foo=bar&param=512y512',
     )
     expect(coverImageUrl(source, 580, 580, { role: 'immersive', pixelRatio: 2 })).toBe(
-      'https://img.test/cover.jpg?foo=bar&param=1280y1280',
+      'https://img.test/cover.jpg?foo=bar&param=1024y1024',
     )
   })
 
@@ -86,12 +86,26 @@ describe('coverImageUrl', () => {
       pixelRatio: 2,
     })
 
-    expect(candidates[0]).toBe('https://p1.music.126.net/hash/cover.jpg?param=1600y1600')
-    expect(candidates.some((url) => url.includes('param=1280y1280'))).toBe(true)
-    expect(candidates.some((url) => url === 'https://p1.music.126.net/hash/cover.jpg')).toBe(true)
+    expect(candidates[0]).toBe('https://p1.music.126.net/hash/cover.jpg?param=1024y1024')
+    expect(candidates.some((url) => url.includes('param=1280y1280'))).toBe(false)
+    expect(candidates.some((url) => url === 'https://p1.music.126.net/hash/cover.jpg')).toBe(false)
     expect(candidates.some((url) => url.includes('p2.music.126.net'))).toBe(true)
-    expect(candidates.some((url) => url.startsWith('http://p1.music.126.net'))).toBe(true)
+    expect(candidates.some((url) => url.startsWith('http://p1.music.126.net'))).toBe(false)
     expect(candidates.some((url) => url.includes('param=1920y1920'))).toBe(false)
+  })
+
+  it('requires an explicit opt-in before trying an unbounded original URL', async () => {
+    const { coverImageCandidates } = await freshCoverImageModule()
+    const source = 'https://img.test/master.jpg?param=3000y3000'
+
+    const bounded = coverImageCandidates(source, 232, 232, { role: 'hero' })
+    expect(bounded.some((url) => url === 'https://img.test/master.jpg')).toBe(false)
+
+    const optedIn = coverImageCandidates(source, 232, 232, {
+      role: 'hero',
+      allowOriginalFallback: true,
+    })
+    expect(optedIn.some((url) => url === 'https://img.test/master.jpg')).toBe(true)
   })
 })
 

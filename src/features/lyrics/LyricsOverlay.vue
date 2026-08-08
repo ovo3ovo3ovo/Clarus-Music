@@ -250,6 +250,10 @@ const player = usePlayerStore()
 const settingsStore = useSettingsStore()
 const lyricsStore = useLyricsStore()
 const background = ref('')
+// Keep the CSS texture URL explicit instead of deriving it directly from the
+// current track. Clearing it before a track swap gives WebKit a deterministic
+// point at which to drop the old decoded background image.
+const textureSource = ref('')
 const copyFeedback = ref('')
 const lyricMenuElement = ref<globalThis.HTMLElement | null>(null)
 const lyricMenu = ref<{
@@ -335,7 +339,7 @@ const backgroundStyle = computed(() => ({
   background: background.value || fallbackCoverGradient(track.value?.id ?? 0),
 }))
 const textureStyle = computed(() => ({
-  backgroundImage: coverUrl.value ? `url(${resizedCover(coverUrl.value, 64)})` : 'none',
+  backgroundImage: textureSource.value ? `url(${textureSource.value})` : 'none',
 }))
 function resizedCover(url: string, size: number): string {
   return coverImageUrl(url, size, size, {
@@ -757,6 +761,10 @@ watch(
     backgroundController?.abort('Lyrics background changed')
     backgroundController = null
     background.value = ''
+    textureSource.value =
+      visible && nextCover && (mode === 'blur' || mode === 'dynamic')
+        ? resizedCover(nextCover, 64)
+        : ''
     if (!visible || !nextCover || mode === 'off') return
     const controller = new AbortController()
     backgroundController = controller
@@ -1004,6 +1012,7 @@ onBeforeUnmount(() => {
 
 onUnmounted(() => {
   backgroundController?.abort('Lyrics overlay disposed')
+  textureSource.value = ''
   if (copyTimer !== null) window.clearTimeout(copyTimer)
   if (scrollResumeTimer !== null) window.clearTimeout(scrollResumeTimer)
   if (targetMeasureFrame !== null) window.cancelAnimationFrame(targetMeasureFrame)

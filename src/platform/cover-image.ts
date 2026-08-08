@@ -9,6 +9,13 @@ export type CoverImageRole =
 
 export interface CoverImageOptions {
   readonly exact?: boolean
+  /**
+   * Permit the final, un-sized source URL as a recovery attempt.  Remote
+   * artwork URLs are deliberately bounded by default: an origin URL can be a
+   * multi-megapixel master and decoding it in WKWebView is an easy way to
+   * turn a navigation sequence into GPU memory growth.
+   */
+  readonly allowOriginalFallback?: boolean
   readonly maxWidth?: number
   readonly minWidth?: number
   readonly pixelRatio?: number
@@ -47,9 +54,12 @@ export const COVER_IMAGE_POLICIES: Readonly<Record<CoverImageRole, CoverImagePol
   player: { minWidth: 128, maxWidth: 160 },
   card: { minWidth: 128, maxWidth: 512 },
   hero: { minWidth: 256, maxWidth: 768 },
-  immersive: { minWidth: 512, maxWidth: 1600 },
+  // The lyric cover is rendered at roughly 580 CSS px.  1024 physical px is
+  // sufficient on a 2x display while avoiding a 1600px decoded backing store
+  // for every track transition.
+  immersive: { minWidth: 512, maxWidth: 1024 },
   'media-session': { minWidth: 256, maxWidth: 512 },
-  video: { minWidth: 320, maxWidth: 1280 },
+  video: { minWidth: 320, maxWidth: 960 },
 }
 
 // A compact set keeps CDN cache keys reusable without forcing a 512px decode
@@ -237,10 +247,15 @@ export function coverImageCandidates(
     )
   }
 
-  // Some CDN records are valid only without a size parameter.
-  add(normalized)
-  const original = source.trim()
-  if (original.length > 0 && original !== normalized) add(original)
+  // A bare remote URL may point at the provider's original multi-megapixel
+  // master.  Never fall back to it implicitly: the caller can opt in for a
+  // legacy endpoint that genuinely ignores `param`, but the normal renderer
+  // must keep every decoded image inside the role budget above.
+  if (options.allowOriginalFallback) {
+    add(normalized)
+    const original = source.trim()
+    if (original.length > 0 && original !== normalized) add(original)
+  }
   return candidates
 }
 
@@ -318,6 +333,8 @@ function pumpCoverPreloads(): void {
     const release = () => {
       if (!activePreloads.delete(image)) return
       if (timeout !== null) globalThis.clearTimeout(timeout)
+      image.removeEventListener?.('load', release)
+      image.removeEventListener?.('error', release)
       // Drop the element's decoded-image reference as soon as the speculative
       // request completes.  HTTP cache reuse is still available to visible UI.
       image.src = EMPTY_IMAGE_SRC

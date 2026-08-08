@@ -8,7 +8,13 @@
       :class="{ 'has-back-navigation': hasBackNavigation }"
     >
       <RouterView v-slot="{ Component, route: viewRoute }">
-        <KeepAlive :max="10">
+        <!--
+          Only the three primary surfaces below are intentionally cached.
+          Keep the cap equal to that contract so a future route cannot retain
+          an unbounded number of decoded covers and list subtrees by merely
+          opting into `meta.keepAlive`.
+        -->
+        <KeepAlive :max="3">
           <component
             :is="Component"
             v-if="viewRoute.meta.keepAlive"

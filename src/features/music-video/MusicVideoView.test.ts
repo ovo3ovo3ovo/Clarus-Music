@@ -101,6 +101,7 @@ describe('MusicVideoView', () => {
   })
 
   it('owns one Plyr instance across routes and pauses audio when video plays', async () => {
+    const nativeLoad = vi.spyOn(HTMLMediaElement.prototype, 'load')
     mocks.detail.mockImplementation(async (videoId: number) => detail(videoId))
     const router = createRouter({
       history: createMemoryHistory(),
@@ -155,10 +156,12 @@ describe('MusicVideoView', () => {
     await flushView()
     expect(mocks.players).toHaveLength(1)
     expect(player.stop).toHaveBeenCalledOnce()
+    expect(nativeLoad).toHaveBeenCalledOnce()
     expect(player.autoplay).toBe(true)
     expect(player.source).toMatchObject({ title: 'MV 11' })
 
     app.unmount()
     expect(player.destroy).toHaveBeenCalledOnce()
+    expect(nativeLoad).toHaveBeenCalledTimes(2)
   })
 })

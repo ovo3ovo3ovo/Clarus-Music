@@ -15,7 +15,10 @@ name = "clarus_music_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
+# `tauri_build_context!` embeds the Vite bundle through build.rs, so the
+# code-generator feature is required. This keeps changed frontend assets from
+# being silently reused from an older macro expansion at package time.
+tauri-build = { version = "2.6.3", features = ["codegen"] }
 
 [dependencies]
 anyhow = "1"

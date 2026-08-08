@@ -247,7 +247,11 @@ pub fn run() {
             playlist::remove_playlist_tracks,
             music_api::cancel_music_request
         ])
-        .build(tauri::generate_context!())
+        // Keep the embedded frontend on the build-script path. Unlike
+        // `generate_context!`, this makes Cargo rebuild the executable when
+        // Vite changes `frontendDist`, rather than allowing stale renderer
+        // assets to be repackaged into a fresh-looking app bundle.
+        .build(tauri::tauri_build_context!())
         .expect("error while building Tauri application")
         .run(|app, event| {
             #[cfg(target_os = "macos")]

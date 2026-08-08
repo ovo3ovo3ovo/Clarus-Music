@@ -139,4 +139,86 @@ describe('CoverImage', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('drops full-size artwork when a detail view unmounts', async () => {
+    const { app, root } = await mountCover()
+    const image = root.querySelector<HTMLImageElement>('img')
+    expect(image?.getAttribute('src')).toContain('param=1024y1024')
+
+    app.unmount()
+
+    expect(image?.getAttribute('src')).toMatch(/^data:image\/gif/)
+  })
+
+  it('releases non-list artwork while its kept-alive page is hidden', async () => {
+    const root = document.createElement('main')
+    root.className = 'app-content'
+    document.body.append(root)
+    const active = ref(true)
+    const app = createApp({
+      setup() {
+        return () =>
+          h(KeepAlive, null, {
+            default: () =>
+              active.value
+                ? h(CoverImage, {
+                    source: 'https://img.test/cover.jpg',
+                    width: 232,
+                    role: 'hero',
+                    alt: 'cover',
+                  })
+                : h('div'),
+          })
+      },
+    })
+    app.mount(root)
+    await nextTick()
+    const image = root.querySelector<HTMLImageElement>('img')
+    expect(image?.getAttribute('src')).toContain('param=256y256')
+
+    active.value = false
+    await nextTick()
+    expect(image?.getAttribute('src')).toMatch(/^data:image\/gif/)
+
+    active.value = true
+    await nextTick()
+    await nextTick()
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0))
+    expect(root.querySelector<HTMLImageElement>('img')?.getAttribute('src')).toContain(
+      'param=256y256',
+    )
+    app.unmount()
+  })
+
+  it('releases a visible cover while the WebView is backgrounded', async () => {
+    const { app, root } = await mountCover()
+    const image = root.querySelector<HTMLImageElement>('img')
+    expect(image?.getAttribute('src')).toContain('param=1024y1024')
+
+    const originalVisibility = document.visibilityState
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'hidden',
+    })
+    try {
+      document.dispatchEvent(new Event('visibilitychange'))
+      await nextTick()
+      expect(image?.getAttribute('src')).toMatch(/^data:image\/gif/)
+
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'visible',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await nextTick()
+      await nextTick()
+      expect(image?.getAttribute('src')).toContain('param=1024y1024')
+    } finally {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: originalVisibility,
+      })
+      app.unmount()
+    }
+  })
 })

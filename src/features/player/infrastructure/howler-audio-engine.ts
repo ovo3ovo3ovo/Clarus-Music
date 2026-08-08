@@ -114,14 +114,21 @@ export class HowlerAudioEngine implements AudioEngine {
 
     try {
       await new Promise<void>((resolve, reject) => {
+        let howl: Howl | null = null
         const handleAbort = () => {
-          this.howl?.unload()
+          // A replacement load can install a newer Howl before this abort
+          // callback runs. Never unload that newer decoder from an old
+          // request's cancellation path.
+          if (howl !== null && this.howl === howl) {
+            howl.unload()
+            this.howl = null
+          }
           reject(abortError(controller.signal.reason))
         }
         controller.signal.addEventListener('abort', handleAbort, { once: true })
         const cleanup = () => controller.signal.removeEventListener('abort', handleAbort)
 
-        const howl = new Howl({
+        howl = new Howl({
           src: [url],
           html5: true,
           preload: true,
