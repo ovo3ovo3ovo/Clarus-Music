@@ -45,7 +45,7 @@ describe('native audio cache boundary', () => {
     const gateway = new NativeAudioCacheGateway(
       invokeCommand as unknown as ConstructorParameters<typeof NativeAudioCacheGateway>[0],
       true,
-      undefined,
+      () => 'cache-read-1',
       () => {
         throw new Error('asset protocol unavailable')
       },
@@ -55,6 +55,7 @@ describe('native audio cache boundary', () => {
     expect(source).toEqual({ kind: 'bytes', bytes, mimeType: 'audio/mpeg' })
     expect(invokeCommand).toHaveBeenCalledWith('read_audio_cache_bytes', {
       leaseId: 'audio-cache-1',
+      requestId: 'cache-read-1',
     })
     await vi.waitFor(() => {
       expect(invokeCommand).toHaveBeenCalledWith('release_audio_cache_lease', {

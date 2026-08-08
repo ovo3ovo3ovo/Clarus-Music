@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import type { AudioSource } from '@/features/player/domain/audio-engine'
 import type { MusicQuality } from '@/features/settings/domain/settings'
 import { desktop } from '@/platform/desktop'
+import { cancellableInvoke } from '@/platform/native-ipc'
 import type { AudioCacheStats } from '../domain/audio-cache'
 
 type InvokeCommand = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
@@ -238,10 +239,16 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
     native: NativeCachedAudioSource,
     signal?: AbortSignal,
   ): Promise<ArrayBuffer> {
-    const bytes = await this.invokeCommand<ArrayBuffer>('read_audio_cache_bytes', {
-      leaseId: native.leaseId,
+    const bytes = await cancellableInvoke<ArrayBuffer>({
+      invokeCommand: this.invokeCommand,
+      createRequestId: this.createRequestId,
+      isDesktop: this.isDesktop,
+      desktopError: 'Cached audio bytes require the desktop app',
+      abortMessage: 'Cached audio read aborted',
+      command: 'read_audio_cache_bytes',
+      args: { leaseId: native.leaseId },
+      signal,
     })
-    if (signal?.aborted) throw abortError(signal.reason)
     if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== native.sizeBytes) {
       throw new Error('Cached audio bytes did not match their index')
     }

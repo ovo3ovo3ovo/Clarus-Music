@@ -1099,39 +1099,51 @@ pub async fn lookup_audio_cache(
 pub async fn read_audio_cache_bytes(
     app: AppHandle,
     state: State<'_, AudioCacheState>,
+    music_state: State<'_, MusicApiState>,
+    request_id: String,
     lease_id: String,
-) -> Result<Response, CacheFailure> {
-    if lease_id.is_empty() || lease_id.len() > 128 || !lease_id.is_ascii() {
-        return Err(CacheFailure::invalid(
-            "leaseId must contain between 1 and 128 ASCII bytes",
-        ));
-    }
-    let lease = state
-        .inner
-        .leases
-        .lock()
+) -> Result<Response, ApiFailure> {
+    let root = cache_root(&app)?;
+    let inner = Arc::clone(&state.inner);
+    music_state
+        .run_cancellable(request_id, async move {
+            if lease_id.is_empty() || lease_id.len() > 128 || !lease_id.is_ascii() {
+                return Err(CacheFailure::invalid(
+                    "leaseId must contain between 1 and 128 ASCII bytes",
+                )
+                .into());
+            }
+            let lease = inner
+                .leases
+                .lock()
+                .await
+                .get(&lease_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CacheFailure::invalid("The audio cache lease is no longer active")
+                })?;
+            let file_path = root.join(lease.file_name);
+            let metadata = fs::metadata(&file_path)
+                .await
+                .map_err(|error| CacheFailure::io("inspect", error))?;
+            if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_TRACK_BYTES {
+                return Err(CacheFailure::corruption(
+                    "The leased audio cache file has an invalid size",
+                )
+                .into());
+            }
+            let bytes = fs::read(&file_path)
+                .await
+                .map_err(|error| CacheFailure::io("read", error))?;
+            if bytes.len() as u64 != metadata.len() {
+                return Err(CacheFailure::corruption(
+                    "The leased audio cache file changed while it was being read",
+                )
+                .into());
+            }
+            Ok(Response::new(bytes))
+        })
         .await
-        .get(&lease_id)
-        .cloned()
-        .ok_or_else(|| CacheFailure::invalid("The audio cache lease is no longer active"))?;
-    let file_path = cache_root(&app)?.join(lease.file_name);
-    let metadata = fs::metadata(&file_path)
-        .await
-        .map_err(|error| CacheFailure::io("inspect", error))?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_TRACK_BYTES {
-        return Err(CacheFailure::corruption(
-            "The leased audio cache file has an invalid size",
-        ));
-    }
-    let bytes = fs::read(&file_path)
-        .await
-        .map_err(|error| CacheFailure::io("read", error))?;
-    if bytes.len() as u64 != metadata.len() {
-        return Err(CacheFailure::corruption(
-            "The leased audio cache file changed while it was being read",
-        ));
-    }
-    Ok(Response::new(bytes))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -613,9 +613,12 @@ function suspendCachedView(): void {
   pageController = null
   playbackController?.abort('Playlist view hidden')
   playbackController = null
+  subscriptionController?.abort('Playlist view hidden')
+  subscriptionController = null
   loading.value = false
   loadingMore.value = false
   hydrating.value = false
+  subscriptionBusy.value = false
 }
 
 function resumeCachedView(): void {
