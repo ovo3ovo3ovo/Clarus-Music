@@ -782,7 +782,7 @@ watch(
 
 function currentLyricTimeMs(): number {
   // Use the same clock that drives the visible progress bar. Reading the
-  // Howler engine independently can land on a different frame and make the
+  // media element independently can land on a different frame and make the
   // highlighted lyric visibly lag or lead the bar after a seek.
   const currentTime = isTransitioning.value
     ? 0
@@ -892,9 +892,7 @@ function ensureLyricClock(): void {
       : typeof player.readCurrentTime === 'function'
         ? player.readCurrentTime
         : null
-  stopLyricSubscription = playbackFrameScheduler.subscribe(({ timestamp, currentTime }) => {
-    tickLyricClock(timestamp, currentTime)
-  }, playbackClock)
+  stopLyricSubscription = playbackFrameScheduler.subscribe(tickLyricClock, playbackClock)
 }
 
 function tickLyricClock(timestamp: number, currentTimeSeconds = Number.NaN): void {

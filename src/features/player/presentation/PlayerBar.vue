@@ -142,14 +142,7 @@
             :disabled="playlistMutationId !== null"
             @click="addCurrentTrackToPlaylist(playlist.id)"
           >
-            <CoverImage
-              :source="playlist.coverUrl"
-              :width="40"
-              role="row"
-              alt=""
-              loading="lazy"
-              viewport-unload
-            />
+            <CoverImage :source="playlist.coverUrl" :width="40" role="row" alt="" loading="lazy" />
             <span>{{ playlist.name }}</span>
             <span
               v-if="playlistMutationId === playlist.id"

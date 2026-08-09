@@ -22,7 +22,6 @@
           :alt="row.item.name"
           loading="lazy"
           decoding="async"
-          viewport-unload
         />
       </RouterLink>
 
@@ -75,6 +74,9 @@ const virtualRows = useFixedRowVirtualizer(
   computed(() => props.items),
   {
     rowHeight: 54,
+    // Playlist cards contain artwork. Preserve their DOM identity so a
+    // scroll does not turn every card into a new image request/decode.
+    virtualizeAt: Number.POSITIVE_INFINITY,
     getItemKey: (playlist) => playlist.id,
   },
 )
@@ -120,17 +122,17 @@ function mobileMeta(playlist: LibraryPlaylist): string {
   align-items: center;
   color: var(--color-text);
   background: transparent;
-  content-visibility: auto;
-  contain-intrinsic-size: 54px;
+  // Keep playlist artwork in normal flow so it is not decoded again after a
+  // scroll suspension in WKWebView.
   transition: transform var(--motion-hover-emphasis) var(--ease-out);
   transform-origin: center;
 
   &.is-virtual-row {
     position: absolute;
-    top: 0;
+    top: var(--virtual-row-y);
     left: 0;
     width: 100%;
-    transform: translate3d(0, var(--virtual-row-y), 0);
+    transform: none;
     transition: none;
   }
 
@@ -153,7 +155,7 @@ function mobileMeta(playlist: LibraryPlaylist): string {
   &.is-virtual-row:hover,
   &.is-virtual-row:focus-within,
   &.is-virtual-row:active {
-    transform: translate3d(0, var(--virtual-row-y), 0);
+    transform: none;
   }
 }
 

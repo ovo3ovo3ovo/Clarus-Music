@@ -180,8 +180,8 @@ function applyVideoSource(current: MusicVideoDetail): void {
     media.preload = autoplay.value ? 'auto' : 'metadata'
     media.load()
   }
-  // Keep the common click-and-browse path on a smaller decoder. The quality
-  // menu still exposes 1080p when the user explicitly chooses it.
+  // Preserve the original default quality; explicit user selection remains
+  // available through Plyr's quality menu.
   videoPlayer.quality = 720
 }
 

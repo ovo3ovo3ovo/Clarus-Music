@@ -1,13 +1,13 @@
-import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/core'
 import type { AudioSource } from '@/features/player/domain/audio-engine'
 import type { MusicQuality } from '@/features/settings/domain/settings'
 import { desktop } from '@/platform/desktop'
-import { cancellableInvoke } from '@/platform/native-ipc'
 import type { AudioCacheStats } from '../domain/audio-cache'
 
 type InvokeCommand = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
-type ConvertFileSrc = (filePath: string) => string
 type UnknownRecord = Record<string, unknown>
+
+export type AudioCacheRuntimeMode = 'normal' | 'performance'
 
 export interface CacheStoreRequest {
   readonly trackId: number
@@ -64,7 +64,7 @@ export function mapNativeCacheStats(value: unknown): AudioCacheStats {
 }
 
 interface NativeCachedAudioSource {
-  readonly filePath: string
+  readonly streamUrl: string
   readonly mimeType: string
   readonly sizeBytes: number
   readonly leaseId: string
@@ -72,12 +72,12 @@ interface NativeCachedAudioSource {
 
 function mapNativeCachedSource(value: unknown): NativeCachedAudioSource {
   if (!isRecord(value)) throw new Error('Invalid cached audio source')
-  const filePath = boundedString(value.filePath, 4096)
+  const streamUrl = boundedString(value.streamUrl, 4096)
   const mimeType = boundedString(value.mimeType, 64)
   const sizeBytes = boundedInteger(value.sizeBytes, 1)
   const leaseId = boundedString(value.leaseId, 128)
   if (
-    filePath === null ||
+    streamUrl === null ||
     mimeType === null ||
     !validMimeType(mimeType) ||
     sizeBytes === null ||
@@ -86,27 +86,35 @@ function mapNativeCachedSource(value: unknown): NativeCachedAudioSource {
   ) {
     throw new Error('Invalid cached audio source')
   }
-  return { filePath, mimeType, sizeBytes, leaseId }
+  const url = new URL(streamUrl)
+  if (
+    url.protocol !== 'http:' ||
+    url.hostname !== '127.0.0.1' ||
+    url.port.length === 0 ||
+    !url.pathname.startsWith('/v1/audio/') ||
+    !url.searchParams.has('token')
+  ) {
+    throw new Error('Invalid cached audio stream URL')
+  }
+  return { streamUrl, mimeType, sizeBytes, leaseId }
 }
 
 export class NativeAudioCacheGateway implements AudioCacheGateway {
   private readonly invokeCommand: InvokeCommand
   private readonly isDesktop: boolean
   private readonly createRequestId: () => string
-  private readonly createManagedUrl: ConvertFileSrc
   private automaticCachingEnabled = true
+  private runtimeMode: AudioCacheRuntimeMode = 'normal'
   private storeController: AbortController | null = null
 
   constructor(
     invokeCommand: InvokeCommand = invoke,
     isDesktop = desktop.isDesktop,
     createRequestId: () => string = () => crypto.randomUUID(),
-    createManagedUrl: ConvertFileSrc = convertFileSrc,
   ) {
     this.invokeCommand = invokeCommand
     this.isDesktop = isDesktop
     this.createRequestId = createRequestId
-    this.createManagedUrl = createManagedUrl
   }
 
   configure(automaticCachingEnabled: boolean): void {
@@ -114,12 +122,22 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
     if (!automaticCachingEnabled) this.storeController?.abort('Automatic audio caching disabled')
   }
 
+  /**
+   * Performance playback is backed by a verified loopback Range fixture. It
+   * must never consult or populate the user's native audio cache, even when a
+   * fixture track happens to use a normal cache key such as 999000.
+   */
+  configureRuntime(mode: AudioCacheRuntimeMode): void {
+    this.runtimeMode = mode
+    if (mode === 'performance') this.storeController?.abort('Performance audio fixture selected')
+  }
+
   async lookup(
     trackId: number,
     quality: MusicQuality,
     signal?: AbortSignal,
   ): Promise<AudioSource | null> {
-    if (!this.isDesktop) return null
+    if (!this.isDesktop || this.runtimeMode === 'performance') return null
     if (signal?.aborted) throw abortError(signal.reason)
     const value = await this.invokeCommand<unknown>('lookup_audio_cache', { trackId, quality })
     if (value === null) return null
@@ -138,45 +156,23 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
     }
 
     const release = this.createLeaseRelease(native.leaseId)
-    try {
-      const url = this.createManagedUrl(native.filePath)
-      if (typeof url !== 'string' || url.length === 0) {
-        throw new Error('Cached audio asset URL was empty')
-      }
-
-      if (signal?.aborted) {
-        release()
-        throw abortError(signal.reason)
-      }
-      return {
-        kind: 'managed-url',
-        url,
-        mimeType: native.mimeType,
-        release,
-      }
-    } catch (error) {
-      if (signal?.aborted) {
-        release()
-        throw abortError(signal.reason)
-      }
-      try {
-        const bytes = await this.readCachedBytes(native, signal)
-        release()
-        return {
-          kind: 'bytes',
-          bytes,
-          mimeType: native.mimeType,
-        }
-      } catch (fallbackError) {
-        release()
-        if (signal?.aborted) throw abortError(signal.reason)
-        throw fallbackError ?? error
-      }
+    if (signal?.aborted) {
+      release()
+      throw abortError(signal.reason)
+    }
+    return {
+      kind: 'managed-url',
+      url: native.streamUrl,
+      mimeType: native.mimeType,
+      release,
     }
   }
 
   async prepare(request: CacheStoreRequest, signal?: AbortSignal): Promise<AudioSource | null> {
-    if (!this.isDesktop || !this.automaticCachingEnabled) return null
+    if (!this.isDesktop || this.runtimeMode === 'performance' || !this.automaticCachingEnabled) {
+      return null
+    }
+    if (signal?.aborted) throw abortError(signal.reason)
     this.storeController?.abort('Audio cache source changed')
     const controller = new AbortController()
     this.storeController = controller
@@ -233,26 +229,6 @@ export class NativeAudioCacheGateway implements AudioCacheGateway {
       released = true
       void this.releaseLease(leaseId)
     }
-  }
-
-  private async readCachedBytes(
-    native: NativeCachedAudioSource,
-    signal?: AbortSignal,
-  ): Promise<ArrayBuffer> {
-    const bytes = await cancellableInvoke<ArrayBuffer>({
-      invokeCommand: this.invokeCommand,
-      createRequestId: this.createRequestId,
-      isDesktop: this.isDesktop,
-      desktopError: 'Cached audio bytes require the desktop app',
-      abortMessage: 'Cached audio read aborted',
-      command: 'read_audio_cache_bytes',
-      args: { leaseId: native.leaseId },
-      signal,
-    })
-    if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== native.sizeBytes) {
-      throw new Error('Cached audio bytes did not match their index')
-    }
-    return bytes
   }
 }
 

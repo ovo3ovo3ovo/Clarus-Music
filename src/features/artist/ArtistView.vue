@@ -1,14 +1,18 @@
 <template>
-  <section class="artist-view" :aria-busy="loading">
+  <section
+    class="artist-view"
+    :aria-busy="loading"
+    :data-artist-id="detail?.artist.id ?? undefined"
+  >
     <ContentLoadingVeil
-      v-if="loading"
+      v-if="loading && !detail"
       :label="t('artist.loading')"
       min-height="clamp(280px, 42vh, 420px)"
     />
 
-    <div v-else-if="loadError" class="center-state request-error" role="alert">
+    <div v-else-if="loadError && !detail" class="center-state request-error" role="alert">
       <span>{{ loadError }}</span>
-      <button type="button" @click="loadDetail">{{ t('artist.retry') }}</button>
+      <button type="button" @click="reloadDetail">{{ t('artist.retry') }}</button>
     </div>
 
     <template v-else-if="detail">
@@ -84,6 +88,7 @@
 
       <p v-if="feedback" class="feedback" role="status">{{ feedback }}</p>
       <p v-if="operationError" class="feedback error" role="alert">{{ operationError }}</p>
+      <p v-if="loadError && detail" class="feedback error" role="alert">{{ loadError }}</p>
 
       <section v-if="detail.latestRelease" class="content-section latest-release">
         <h2>{{ t('artist.latestRelease') }}</h2>
@@ -192,7 +197,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import {
+  computed,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  ref,
+  shallowRef,
+  watch,
+} from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { parsePositiveIntegerRouteParam } from '@/app/route-params'
@@ -250,6 +264,7 @@ const videosSection = ref<ReturnType<typeof document.querySelector>>(null)
 let detailController: AbortController | null = null
 let playbackController: AbortController | null = null
 let subscriptionController: AbortController | null = null
+let viewActive = true
 
 const artistId = computed(() => parsePositiveIntegerRouteParam(route.params.id))
 const latestVideo = computed(() => detail.value?.videos[0] ?? null)
@@ -289,7 +304,7 @@ function isAbort(reason: unknown): boolean {
 
 async function loadDetail(): Promise<void> {
   const id = artistId.value
-  if (id === null) return
+  if (id === null || !viewActive) return
   detailController?.abort('Artist detail superseded')
   playbackController?.abort('Artist changed')
   subscriptionController?.abort('Artist changed')
@@ -310,15 +325,24 @@ async function loadDetail(): Promise<void> {
   menuOpen.value = false
   try {
     const loaded = await artistGateway.detail(id, controller.signal)
-    if (detailController === controller) detail.value = loaded
+    if (detailController === controller && viewActive) detail.value = loaded
   } catch (reason) {
-    if (!isAbort(reason)) loadError.value = message(reason)
+    // A kept-alive view can be hidden while its native request is settling.
+    // Ignore that stale rejection just like an AbortError; otherwise a late
+    // failure from the hidden route can overwrite the next active surface.
+    if (detailController === controller && viewActive && !isAbort(reason)) {
+      loadError.value = message(reason)
+    }
   } finally {
     if (detailController === controller) {
       detailController = null
       loading.value = false
     }
   }
+}
+
+function reloadDetail(): void {
+  void loadDetail()
 }
 
 async function loadSelection(
@@ -461,14 +485,38 @@ function closeTransientUi(event: Event): void {
 }
 
 watch(artistId, () => void loadDetail(), { immediate: true })
+function resumeCachedView(): void {
+  viewActive = true
+  // The route watcher is intentionally inert while this kept-alive surface is
+  // deactivated. Reload when the cached detail belongs to another route, but
+  // do not duplicate the initial request while it is already in flight.
+  if (detailController === null && detail.value?.artist.id !== (artistId.value ?? null)) {
+    void loadDetail()
+  }
+}
+
+function suspendCachedView(reason: string): void {
+  viewActive = false
+  detailController?.abort(reason)
+  detailController = null
+  playbackController?.abort(reason)
+  playbackController = null
+  subscriptionController?.abort(reason)
+  subscriptionController = null
+  loading.value = false
+  busyTrackId.value = null
+  busyAlbumId.value = null
+  subscriptionBusy.value = false
+}
+
+onActivated(resumeCachedView)
+onDeactivated(() => suspendCachedView('Artist view hidden'))
 onMounted(() => {
   document.addEventListener('pointerdown', closeMenuOnOutsideClick)
   document.addEventListener('keydown', closeTransientUi)
 })
 onBeforeUnmount(() => {
-  detailController?.abort('Artist view disposed')
-  playbackController?.abort('Artist view disposed')
-  subscriptionController?.abort('Artist view disposed')
+  suspendCachedView('Artist view disposed')
   document.removeEventListener('pointerdown', closeMenuOnOutsideClick)
   document.removeEventListener('keydown', closeTransientUi)
 })

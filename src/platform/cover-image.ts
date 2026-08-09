@@ -67,10 +67,11 @@ export const COVER_IMAGE_POLICIES: Readonly<Record<CoverImageRole, CoverImagePol
   // for every track transition.
   immersive: { minWidth: 512, maxWidth: 1024 },
   'media-session': { minWidth: 256, maxWidth: 512 },
-  // Video cards are dense thumbnails, not the full player poster. Keep the
-  // decoded bitmap below one megapixel even on a 2x display; the player keeps
-  // the separate `video` policy for its larger poster.
-  'video-card': { minWidth: 320, maxWidth: 640 },
+  // Video cards are dense thumbnails, not the full player poster. A 480px
+  // source is already enough for the ~464px card while keeping a long artist
+  // navigation sequence from accumulating oversized compositor surfaces; the
+  // player keeps the separate `video` policy for its larger poster.
+  'video-card': { minWidth: 240, maxWidth: 480 },
   video: { minWidth: 320, maxWidth: 960 },
 }
 
@@ -84,110 +85,6 @@ const MAX_REMEMBERED_PRELOADS = 16
 const MAX_REMEMBERED_PRELOAD_BYTES = 2 * 1024 * 1024
 const PRELOAD_TIMEOUT_MS = 8_000
 const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='
-
-/**
- * A decoded image is much larger than its HTTP response. Keep the estimated
- * live backing stores for viewport-managed covers bounded as a group. This is
- * deliberately an estimate: WebKit owns the actual decoded-image cache, but
- * a deterministic release point prevents a long scroll from retaining every
- * card that has ever entered the look-ahead window.
- */
-export const COVER_IMAGE_DECODE_BUDGET_BYTES = 32 * 1024 * 1024
-
-interface CoverImageBudgetEntry {
-  readonly estimatedBytes: () => number
-  readonly release: () => void
-  decoded: boolean
-  accountedBytes: number
-  unloadable: boolean
-  lastTouched: number
-  releasing: boolean
-}
-
-export interface CoverImageBudgetHandle {
-  markDecoded(decoded: boolean): void
-  setUnloadable(unloadable: boolean): void
-  touch(): void
-  dispose(): void
-}
-
-const decodedCoverEntries = new Set<CoverImageBudgetEntry>()
-let decodedCoverBytes = 0
-let coverTouchSequence = 0
-
-function estimatedEntryBytes(entry: CoverImageBudgetEntry): number {
-  const bytes = entry.estimatedBytes()
-  return Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes) : 0
-}
-
-function enforceCoverImageBudget(): void {
-  while (decodedCoverBytes > COVER_IMAGE_DECODE_BUDGET_BYTES) {
-    const candidate = [...decodedCoverEntries]
-      .filter((entry) => entry.decoded && entry.unloadable && !entry.releasing)
-      .sort((left, right) => left.lastTouched - right.lastTouched)[0]
-    if (candidate === undefined) return
-    candidate.releasing = true
-    try {
-      candidate.release()
-    } finally {
-      candidate.releasing = false
-    }
-    // A defensive decrement keeps a faulty consumer from spinning forever;
-    // normal CoverImage releases call markDecoded(false) synchronously.
-    if (candidate.decoded) {
-      candidate.decoded = false
-      decodedCoverBytes = Math.max(0, decodedCoverBytes - candidate.accountedBytes)
-      candidate.accountedBytes = 0
-    }
-  }
-}
-
-export function registerCoverImageBudget(
-  estimatedBytes: () => number,
-  release: () => void,
-): CoverImageBudgetHandle {
-  const entry: CoverImageBudgetEntry = {
-    estimatedBytes,
-    release,
-    decoded: false,
-    accountedBytes: 0,
-    unloadable: false,
-    lastTouched: ++coverTouchSequence,
-    releasing: false,
-  }
-  decodedCoverEntries.add(entry)
-
-  return {
-    markDecoded(decoded) {
-      if (entry.decoded === decoded) return
-      if (decoded) {
-        entry.decoded = true
-        entry.accountedBytes = estimatedEntryBytes(entry)
-        decodedCoverBytes += entry.accountedBytes
-      } else {
-        entry.decoded = false
-        decodedCoverBytes = Math.max(0, decodedCoverBytes - entry.accountedBytes)
-        entry.accountedBytes = 0
-      }
-      enforceCoverImageBudget()
-    },
-    setUnloadable(unloadable) {
-      entry.unloadable = unloadable
-      enforceCoverImageBudget()
-    },
-    touch() {
-      entry.lastTouched = ++coverTouchSequence
-    },
-    dispose() {
-      if (!decodedCoverEntries.delete(entry)) return
-      if (entry.decoded) {
-        decodedCoverBytes = Math.max(0, decodedCoverBytes - entry.accountedBytes)
-        entry.decoded = false
-        entry.accountedBytes = 0
-      }
-    },
-  }
-}
 
 const prefetchedUrls = new Map<string, PreloadRequest>()
 const activePreloads = new Map<HTMLImageElement, PreloadRequest>()
@@ -205,20 +102,28 @@ function selectedWidth(target: number, widths: readonly number[]): number {
 }
 
 function normalizedSource(source: string): string {
-  const normalizedProtocol = source.trim().replace(/^http:\/\//i, 'https://')
+  const trimmed = source.trim()
+  const isLoopbackFixture = /^http:\/\/127\.0\.0\.1(?::\d+)?(?:\/|$)/i.test(trimmed)
+  const normalizedProtocol = isLoopbackFixture
+    ? trimmed
+    : trimmed.replace(/^http:\/\//i, 'https://')
   if (normalizedProtocol.length === 0) return ''
 
   try {
     const url = new URL(normalizedProtocol)
+    // CoverImage is the browser-backed visible path. Keep custom schemes,
+    // data/blob URLs, and relative paths out of it so only ordinary HTTPS
+    // resources can become visible <img> requests.
+    // Production artwork stays HTTPS. The offline self-runner is intentionally
+    // bound to loopback and uses its local deterministic image fixture server;
+    // allowing only that origin keeps the normal renderer contract intact.
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === '127.0.0.1')) {
+      return ''
+    }
     url.searchParams.delete('param')
     return url.toString()
   } catch {
-    const [withoutHash, hash = ''] = normalizedProtocol.split('#', 2)
-    const [path, query = ''] = (withoutHash ?? '').split('?', 2)
-    const params = new URLSearchParams(query)
-    params.delete('param')
-    const normalizedQuery = params.toString()
-    return `${path ?? ''}${normalizedQuery ? `?${normalizedQuery}` : ''}${hash ? `#${hash}` : ''}`
+    return ''
   }
 }
 
@@ -244,7 +149,7 @@ function sourceVariants(source: string): readonly string[] {
       }
     }
   } catch {
-    // Non-URL sources still get the normalized and original candidates below.
+    // normalizedSource already guarantees an absolute HTTPS URL.
   }
 
   const original = source.trim()
@@ -281,18 +186,9 @@ function resolveCoverImageRequest(
     ? outputWidth
     : Math.max(1, Math.round(outputWidth * (height / width)))
 
-  try {
-    const url = new URL(normalized)
-    url.searchParams.set('param', `${outputWidth}y${outputHeight}`)
-    return { url: url.toString(), width: outputWidth, height: outputHeight }
-  } catch {
-    const separator = normalized.includes('?') ? '&' : '?'
-    return {
-      url: `${normalized}${separator}param=${outputWidth}y${outputHeight}`,
-      width: outputWidth,
-      height: outputHeight,
-    }
-  }
+  const url = new URL(normalized)
+  url.searchParams.set('param', `${outputWidth}y${outputHeight}`)
+  return { url: url.toString(), width: outputWidth, height: outputHeight }
 }
 
 export function coverImageUrl(
@@ -301,7 +197,11 @@ export function coverImageUrl(
   logicalHeight = logicalWidth,
   options: CoverImageOptions = {},
 ): string {
-  return resolveCoverImageRequest(source, logicalWidth, logicalHeight, options)?.url ?? ''
+  const request = resolveCoverImageRequest(source, logicalWidth, logicalHeight, options)
+  // Visible artwork must stay on the browser's normal HTTPS image pipeline.
+  // Routing every <img> through a custom scheme would forfeit WebKit's mature
+  // HTTP response and decoded-image cache and was the source of the DFS churn.
+  return request?.url ?? ''
 }
 
 function fallbackWidths(
@@ -369,8 +269,6 @@ export function coverImageCandidates(
   // must keep every decoded image inside the role budget above.
   if (options.allowOriginalFallback) {
     add(normalized)
-    const original = source.trim()
-    if (original.length > 0 && original !== normalized) add(original)
   }
   return candidates
 }

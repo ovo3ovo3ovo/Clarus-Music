@@ -26,7 +26,7 @@ import {
   type MediaSessionTransport,
   type PlayerMediaSession,
 } from '../infrastructure/browser-media-session'
-import { HowlerAudioEngine } from '../infrastructure/howler-audio-engine'
+import { HtmlAudioEngine } from '../infrastructure/html-audio-engine'
 import { nativeTrackLikeGateway, type TrackLikeGateway } from '../infrastructure/native-like'
 import { emitTrackLikeChange } from './track-like-events'
 import { playbackFrameScheduler } from './playback-frame-scheduler'
@@ -84,7 +84,7 @@ function defaultQueuePersistence(storeId: string): PlayerQueuePersistence {
 }
 
 function createEngine(): AudioEngine {
-  return new HowlerAudioEngine()
+  return new HtmlAudioEngine()
 }
 
 function isAbort(reason: unknown): boolean {
@@ -156,7 +156,6 @@ export function createPlayerStore(
     let navigationController: AbortController | null = null
     let likeController: AbortController | null = null
     let likeStateVersion = 0
-    let stopProgressSubscription: (() => void) | null = null
     let queueContinuation: QueueContinuationState | null = null
     let queueContinuationController: AbortController | null = null
     let queueContinuationTask: Promise<QueueContinuationFetchResult> | null = null
@@ -269,27 +268,6 @@ export function createPlayerStore(
     const playbackClock = markRaw({ read: () => engine.currentTime })
     const releasePlaybackClock = playbackFrameScheduler.setClock(playbackClock.read)
 
-    const stopProgressClock = () => {
-      stopProgressSubscription?.()
-      stopProgressSubscription = null
-    }
-
-    const tickProgress = ({ currentTime }: { readonly currentTime: number }) => {
-      if (Number.isFinite(currentTime)) progress.value = currentTime
-    }
-
-    const syncProgressClock = () => {
-      stopProgressClock()
-      if (playing.value && !document.hidden) {
-        stopProgressSubscription = playbackFrameScheduler.subscribe(
-          tickProgress,
-          playbackClock.read,
-        )
-      } else {
-        playbackFrameScheduler.wake()
-      }
-    }
-
     const syncMediaPosition = (position = engine.currentTime) => {
       const track = currentTrack.value
       if (track === null) {
@@ -314,7 +292,6 @@ export function createPlayerStore(
     const unsubscribers = [
       engine.subscribe('state', (value) => {
         state.value = value
-        syncProgressClock()
         syncMediaPlaybackState(value)
         syncMediaPosition()
         if (value === 'ended') void advance('next', 'ended')
@@ -324,7 +301,7 @@ export function createPlayerStore(
         syncMediaPosition()
       }),
       engine.subscribe('time', (value) => {
-        if (!playing.value) progress.value = value
+        if (Number.isFinite(value)) progress.value = value
         syncMediaPosition(value)
       }),
       engine.subscribe('seeked', (value) => {
@@ -340,7 +317,11 @@ export function createPlayerStore(
       }),
     ]
 
-    const handleVisibilityChange = () => syncProgressClock()
+    // Components subscribe to the shared scheduler only while they need a
+    // display-rate visual. Waking it here restores those subscriptions when a
+    // hidden WebView becomes visible without turning playback time into a
+    // 120 Hz Vue update.
+    const handleVisibilityChange = () => playbackFrameScheduler.wake()
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
     async function loadAudio(
@@ -785,9 +766,7 @@ export function createPlayerStore(
     // Read the media element directly, matching the legacy player's seek(null)
     // behavior for lyric synchronization after a seek.
     function readCurrentTime(): number {
-      const value = readPlaybackTime()
-      if (!playing.value) progress.value = value
-      return value
+      return readPlaybackTime()
     }
 
     function readPlaybackTime(): number {
@@ -807,12 +786,17 @@ export function createPlayerStore(
       likeBusy.value = true
       let rollbackState = liked.value
       try {
-        const currentLiked = liked.value ?? (await likeGateway.check(track.id, controller.signal))
+        const currentLiked =
+          liked.value ?? (await likeGateway.check(track.id, controller.signal))
         if (currentTrack.value?.id !== track.id || likeController !== controller) return false
         rollbackState = currentLiked
         likeStateVersion += 1
         liked.value = !currentLiked
-        const nextLiked = await likeGateway.setLiked(track.id, !currentLiked, controller.signal)
+        const nextLiked = await likeGateway.setLiked(
+          track.id,
+          !currentLiked,
+          controller.signal,
+        )
         if (currentTrack.value?.id === track.id && likeController === controller) {
           liked.value = nextLiked
           emitTrackLikeChange({ track, liked: nextLiked })
@@ -936,7 +920,6 @@ export function createPlayerStore(
       activeLoad.value?.abort('Player disposed')
       activeLoad.value = null
       cancelLike('Player disposed')
-      stopProgressClock()
       releasePlaybackClock()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       for (const unsubscribe of unsubscribers) unsubscribe()

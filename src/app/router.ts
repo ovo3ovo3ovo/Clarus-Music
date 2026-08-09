@@ -59,6 +59,7 @@ const routes: readonly RouteRecordRaw[] = [
     path: '/artist/:id',
     name: 'artist',
     component: () => import('@/features/artist/ArtistView.vue'),
+    meta: { keepAlive: true, cacheKey: 'artist' },
     beforeEnter: (to) =>
       parsePositiveIntegerRouteParam(to.params.id) ? true : { path: '/library', replace: true },
   },

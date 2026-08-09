@@ -26,7 +26,6 @@
           :alt="row.item.name"
           loading="lazy"
           decoding="async"
-          viewport-unload
         />
       </RouterLink>
 
@@ -75,6 +74,9 @@ const virtualRows = useFixedRowVirtualizer(
   computed(() => props.items),
   {
     rowHeight: 54,
+    // Keep artwork rows stable across scrolling; the browser can still use
+    // native lazy loading without Vue destroying and recreating images.
+    virtualizeAt: Number.POSITIVE_INFINITY,
     getItemKey: (item) => `${item.kind}-${item.id}`,
   },
 )
@@ -127,17 +129,17 @@ function mobileContext(item: CatalogCoverCard): string {
   align-items: center;
   color: var(--color-text);
   background: transparent;
-  content-visibility: auto;
-  contain-intrinsic-size: 54px;
+  // Keep artwork rows in normal flow so scrolling does not suspend and
+  // recreate lazy image decoders in WKWebView.
   transition: transform var(--motion-hover-emphasis) var(--ease-out);
   transform-origin: center;
 
   &.is-virtual-row {
     position: absolute;
-    top: 0;
+    top: var(--virtual-row-y);
     left: 0;
     width: 100%;
-    transform: translate3d(0, var(--virtual-row-y), 0);
+    transform: none;
     transition: none;
   }
 
@@ -160,7 +162,7 @@ function mobileContext(item: CatalogCoverCard): string {
   &.is-virtual-row:hover,
   &.is-virtual-row:focus-within,
   &.is-virtual-row:active {
-    transform: translate3d(0, var(--virtual-row-y), 0);
+    transform: none;
   }
 }
 

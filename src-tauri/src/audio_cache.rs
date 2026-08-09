@@ -14,10 +14,11 @@ use futures_util::{Stream, StreamExt};
 use reqwest::{header::CONTENT_LENGTH, Client};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{ipc::Response, AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::{
     fs,
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     sync::{Mutex, Semaphore},
 };
 
@@ -39,6 +40,8 @@ const DEFAULT_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_CONCURRENT_DOWNLOADS: usize = 3;
 const ACCESS_FLUSH_HITS: usize = 32;
 const ACCESS_FLUSH_INTERVAL_MS: u64 = 30_000;
+const MAX_STREAM_REQUEST_BYTES: usize = 16 * 1024;
+const STREAM_COPY_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct AudioCacheState {
@@ -57,6 +60,13 @@ struct AudioCacheInner {
     resident_index: Mutex<Option<ResidentIndex>>,
     next_nonce: AtomicU64,
     http: Client,
+    stream_endpoint: std::sync::RwLock<Option<AudioStreamEndpoint>>,
+}
+
+#[derive(Clone)]
+struct AudioStreamEndpoint {
+    origin: String,
+    token: String,
 }
 
 #[derive(Clone)]
@@ -87,6 +97,7 @@ impl Default for AudioCacheState {
                 resident_index: Mutex::new(None),
                 next_nonce: AtomicU64::new(1),
                 http,
+                stream_endpoint: std::sync::RwLock::new(None),
             }),
         }
     }
@@ -197,7 +208,7 @@ impl Default for CacheIndex {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachedAudioSource {
-    file_path: String,
+    stream_url: String,
     mime_type: String,
     size_bytes: u64,
     lease_id: String,
@@ -368,6 +379,296 @@ fn cache_root(app: &AppHandle) -> Result<PathBuf, CacheFailure> {
             kind: "path",
             message: format!("Failed to resolve the audio cache directory: {error}"),
         })
+}
+
+impl AudioCacheState {
+    pub(crate) fn start_stream_server(&self, app: &AppHandle) -> Result<(), CacheFailure> {
+        let root = cache_root(app)?;
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .map_err(|error| CacheFailure::io("bind the audio stream server", error))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| CacheFailure::io("configure the audio stream server", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| CacheFailure::io("inspect the audio stream server", error))?;
+        let mut secret = [0_u8; 32];
+        getrandom::fill(&mut secret).map_err(|error| CacheFailure {
+            kind: "stream",
+            message: format!("Failed to secure the audio stream server: {error}"),
+        })?;
+        let token = secret
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let endpoint = AudioStreamEndpoint {
+            origin: format!("http://127.0.0.1:{}", address.port()),
+            token,
+        };
+        *self.inner.stream_endpoint.write().map_err(|_| {
+            CacheFailure::corruption("The audio stream endpoint lock was poisoned")
+        })? = Some(endpoint.clone());
+
+        let inner = Arc::clone(&self.inner);
+        tauri::async_runtime::spawn(async move {
+            let listener = match TcpListener::from_std(listener) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    log::error!("Failed to start the audio stream server: {error}");
+                    return;
+                }
+            };
+            loop {
+                let (stream, peer) = match listener.accept().await {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        log::error!("Audio stream server stopped: {error}");
+                        break;
+                    }
+                };
+                if !peer.ip().is_loopback() {
+                    continue;
+                }
+                let inner = Arc::clone(&inner);
+                let root = root.clone();
+                let endpoint = endpoint.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = serve_audio_stream(stream, &root, &inner, &endpoint).await {
+                        log::debug!("Audio stream request ended: {error}");
+                    }
+                });
+            }
+        });
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedStreamRequest {
+    head: bool,
+    lease_id: String,
+    range: Option<String>,
+}
+
+fn constant_time_equal(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn parse_stream_request(
+    header: &[u8],
+    expected_token: &str,
+) -> Result<ParsedStreamRequest, &'static str> {
+    let text = std::str::from_utf8(header).map_err(|_| "request headers were not UTF-8")?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().ok_or("request line was missing")?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().ok_or("request method was missing")?;
+    let target = request_parts.next().ok_or("request target was missing")?;
+    let version = request_parts.next().ok_or("HTTP version was missing")?;
+    if request_parts.next().is_some() || !matches!(method, "GET" | "HEAD") || version != "HTTP/1.1"
+    {
+        return Err("unsupported audio stream request");
+    }
+    let (path, query) = target.split_once('?').ok_or("stream token was missing")?;
+    let lease_id = path
+        .strip_prefix("/v1/audio/")
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .ok_or("invalid stream lease")?;
+    let supplied_token = url::form_urlencoded::parse(query.as_bytes())
+        .find_map(|(key, value)| (key == "token").then_some(value.into_owned()))
+        .ok_or("stream token was missing")?;
+    if !constant_time_equal(&supplied_token, expected_token) {
+        return Err("invalid stream token");
+    }
+    let mut range = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("range") {
+            if range.is_some() {
+                return Err("multiple range headers are unsupported");
+            }
+            range = Some(value.trim().to_string());
+        }
+    }
+    Ok(ParsedStreamRequest {
+        head: method == "HEAD",
+        lease_id: lease_id.to_string(),
+        range,
+    })
+}
+
+fn parse_byte_range(value: Option<&str>, length: u64) -> Result<(u64, u64, bool), ()> {
+    if length == 0 {
+        return Err(());
+    }
+    let Some(value) = value else {
+        return Ok((0, length - 1, false));
+    };
+    let bytes = value.strip_prefix("bytes=").ok_or(())?;
+    if bytes.contains(',') {
+        return Err(());
+    }
+    let (start, end) = bytes.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix = end
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or(())?;
+        return Ok((length.saturating_sub(suffix.min(length)), length - 1, true));
+    }
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    if start >= length {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        length - 1
+    } else {
+        end.parse::<u64>().map_err(|_| ())?.min(length - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok((start, end, true))
+}
+
+fn stream_mime_type(file_name: &str) -> &'static str {
+    match Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+    {
+        Some("flac") => "audio/flac",
+        Some("m4a") => "audio/mp4",
+        Some("ogg") => "audio/ogg",
+        Some("webm") => "audio/webm",
+        _ => "audio/mpeg",
+    }
+}
+
+async fn write_stream_error(
+    stream: &mut TcpStream,
+    status: &str,
+    extra_headers: &str,
+) -> std::io::Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n{extra_headers}\r\n"
+    );
+    stream.write_all(response.as_bytes()).await
+}
+
+async fn serve_audio_stream(
+    mut stream: TcpStream,
+    root: &Path,
+    inner: &AudioCacheInner,
+    endpoint: &AudioStreamEndpoint,
+) -> Result<(), String> {
+    let mut header = Vec::with_capacity(2_048);
+    let mut chunk = [0_u8; 1_024];
+    while !header.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 || header.len().saturating_add(read) > MAX_STREAM_REQUEST_BYTES {
+            let _ = write_stream_error(&mut stream, "400 Bad Request", "").await;
+            return Err("invalid audio request headers".to_string());
+        }
+        header.extend_from_slice(&chunk[..read]);
+    }
+    let request = match parse_stream_request(&header, &endpoint.token) {
+        Ok(request) => request,
+        Err(message) => {
+            let _ = write_stream_error(&mut stream, "403 Forbidden", "").await;
+            return Err(message.to_string());
+        }
+    };
+    let lease = inner
+        .leases
+        .lock()
+        .await
+        .get(&request.lease_id)
+        .cloned()
+        .ok_or_else(|| "audio stream lease expired".to_string())?;
+    let mut file = fs::File::open(root.join(&lease.file_name))
+        .await
+        .map_err(|error| error.to_string())?;
+    let length = file
+        .metadata()
+        .await
+        .map_err(|error| error.to_string())?
+        .len();
+    let (start, end, partial) = match parse_byte_range(request.range.as_deref(), length) {
+        Ok(range) => range,
+        Err(()) => {
+            let _ = write_stream_error(
+                &mut stream,
+                "416 Range Not Satisfiable",
+                &format!("Content-Range: bytes */{length}\r\n"),
+            )
+            .await;
+            return Err("invalid audio byte range".to_string());
+        }
+    };
+    let response_length = end - start + 1;
+    let status = if partial {
+        "206 Partial Content"
+    } else {
+        "200 OK"
+    };
+    let content_range = if partial {
+        format!("Content-Range: bytes {start}-{end}/{length}\r\n")
+    } else {
+        String::new()
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {response_length}\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n{content_range}\r\n",
+        stream_mime_type(&lease.file_name),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|error| error.to_string())?;
+    if request.head {
+        return Ok(());
+    }
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut remaining = response_length;
+    let mut buffer = vec![0_u8; STREAM_COPY_BUFFER_BYTES];
+    while remaining > 0 {
+        let maximum = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = file
+            .read(&mut buffer[..maximum])
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err("cached audio ended before its indexed size".to_string());
+        }
+        stream
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|error| error.to_string())?;
+        remaining -= read as u64;
+    }
+    Ok(())
 }
 
 fn validate_track(track_id: i64) -> Result<(), CacheFailure> {
@@ -1077,73 +1378,28 @@ pub async fn lookup_audio_cache(
         let _ = fs::remove_file(&file_path).await;
         return Ok(None);
     }
-    let file_path = file_path
-        .to_str()
-        .ok_or_else(|| CacheFailure::corruption("The cached audio path is not valid UTF-8"))?
-        .to_string();
     {
         let mut resident = inner.resident_index.lock().await;
         let resident_index = resident.as_mut().expect("resident index is initialized");
         record_entry_access(&root, resident_index, &key, now_ms()).await?;
     }
     let lease_id = register_lease(&inner, key, file_name).await?;
+    let endpoint = inner
+        .stream_endpoint
+        .read()
+        .map_err(|_| CacheFailure::corruption("The audio stream endpoint lock was poisoned"))?
+        .clone()
+        .ok_or_else(|| CacheFailure::corruption("The audio stream server is unavailable"))?;
+    let stream_url = format!(
+        "{}/v1/audio/{}?token={}",
+        endpoint.origin, lease_id, endpoint.token
+    );
     Ok(Some(CachedAudioSource {
-        file_path,
+        stream_url,
         mime_type,
         size_bytes,
         lease_id,
     }))
-}
-
-#[tauri::command]
-pub async fn read_audio_cache_bytes(
-    app: AppHandle,
-    state: State<'_, AudioCacheState>,
-    music_state: State<'_, MusicApiState>,
-    request_id: String,
-    lease_id: String,
-) -> Result<Response, ApiFailure> {
-    let root = cache_root(&app)?;
-    let inner = Arc::clone(&state.inner);
-    music_state
-        .run_cancellable(request_id, async move {
-            if lease_id.is_empty() || lease_id.len() > 128 || !lease_id.is_ascii() {
-                return Err(CacheFailure::invalid(
-                    "leaseId must contain between 1 and 128 ASCII bytes",
-                )
-                .into());
-            }
-            let lease = inner
-                .leases
-                .lock()
-                .await
-                .get(&lease_id)
-                .cloned()
-                .ok_or_else(|| {
-                    CacheFailure::invalid("The audio cache lease is no longer active")
-                })?;
-            let file_path = root.join(lease.file_name);
-            let metadata = fs::metadata(&file_path)
-                .await
-                .map_err(|error| CacheFailure::io("inspect", error))?;
-            if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_TRACK_BYTES {
-                return Err(CacheFailure::corruption(
-                    "The leased audio cache file has an invalid size",
-                )
-                .into());
-            }
-            let bytes = fs::read(&file_path)
-                .await
-                .map_err(|error| CacheFailure::io("read", error))?;
-            if bytes.len() as u64 != metadata.len() {
-                return Err(CacheFailure::corruption(
-                    "The leased audio cache file changed while it was being read",
-                )
-                .into());
-            }
-            Ok(Response::new(bytes))
-        })
-        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1351,10 +1607,11 @@ mod tests {
 
     use super::{
         begin_in_flight, cache_key, cleanup_orphaned_files, commit_download, download_stream,
-        managed_audio_file_name, normalize_mime_type, read_index, record_entry_access,
-        register_lease, release_lease, safe_entry_file_name, trim_resident_index, validate_quality,
-        write_index, AudioCacheState, CacheEntry, CacheIndex, ResidentIndex, TemporaryReservation,
-        ACCESS_FLUSH_HITS, MAX_CONCURRENT_DOWNLOADS, MAX_LEASES, MAX_TOTAL_BYTES, MAX_TRACK_BYTES,
+        managed_audio_file_name, normalize_mime_type, parse_byte_range, parse_stream_request,
+        read_index, record_entry_access, register_lease, release_lease, safe_entry_file_name,
+        trim_resident_index, validate_quality, write_index, AudioCacheState, CacheEntry,
+        CacheIndex, ParsedStreamRequest, ResidentIndex, TemporaryReservation, ACCESS_FLUSH_HITS,
+        MAX_CONCURRENT_DOWNLOADS, MAX_LEASES, MAX_TOTAL_BYTES, MAX_TRACK_BYTES,
     };
 
     fn entry(track_id: i64, quality: &str, file_name: &str, size_bytes: u64) -> CacheEntry {
@@ -1399,6 +1656,31 @@ mod tests {
             "../outside.mp3",
             3
         )));
+    }
+
+    #[test]
+    fn loopback_stream_parser_requires_the_secret_and_supports_ranges() {
+        let request = b"GET /v1/audio/audio-cache-42?token=secret HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=64-127\r\n\r\n";
+        assert_eq!(
+            parse_stream_request(request, "secret").expect("stream request"),
+            ParsedStreamRequest {
+                head: false,
+                lease_id: "audio-cache-42".to_string(),
+                range: Some("bytes=64-127".to_string()),
+            }
+        );
+        assert!(parse_stream_request(request, "different").is_err());
+        assert_eq!(
+            parse_byte_range(Some("bytes=64-127"), 1_000),
+            Ok((64, 127, true))
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=-100"), 1_000),
+            Ok((900, 999, true))
+        );
+        assert_eq!(parse_byte_range(None, 1_000), Ok((0, 999, false)));
+        assert!(parse_byte_range(Some("bytes=1000-"), 1_000).is_err());
+        assert!(parse_byte_range(Some("bytes=0-1,4-5"), 1_000).is_err());
     }
 
     #[tokio::test]

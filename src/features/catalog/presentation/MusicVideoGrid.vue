@@ -10,7 +10,6 @@
           :alt="video.name"
           loading="lazy"
           decoding="async"
-          viewport-unload
         />
       </RouterLink>
       <RouterLink class="video-title" :to="`/mv/${video.id}`">{{ video.name }}</RouterLink>
@@ -42,8 +41,8 @@ defineProps<{ items: readonly MusicVideoCard[] }>()
   z-index: 0;
   min-width: 0;
   color: var(--color-text);
-  content-visibility: auto;
-  contain-intrinsic-size: auto 150px;
+  // Stable image nodes avoid a lazy-image decode cycle when this grid is
+  // revisited from a music-video route.
   transform-origin: center;
   transition: transform var(--motion-hover-emphasis) var(--ease-out);
 

@@ -3,6 +3,7 @@
     ref="imageElement"
     v-bind="$attrs"
     :src="currentSource"
+    :loading="loadingAttribute"
     :data-cover-state="coverState"
     @error="handleError"
     @load="handleLoad"
@@ -10,50 +11,17 @@
 </template>
 
 <script setup lang="ts">
-import {
-  computed,
-  nextTick,
-  onActivated,
-  onBeforeUnmount,
-  onDeactivated,
-  onMounted,
-  ref,
-  watch,
-} from 'vue'
+import { computed, ref, useAttrs, watch } from 'vue'
 import {
   coverImageCandidates,
-  coverImageUrl,
-  registerCoverImageBudget,
   type CoverImageOptions,
   type CoverImageRole,
 } from '@/platform/cover-image'
 
 defineOptions({ inheritAttrs: false })
 
+const attrs = useAttrs()
 const EMPTY_COVER_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='
-
-type VisibilitySubscriber = () => void
-const visibilitySubscribers = new Set<VisibilitySubscriber>()
-let visibilityListenerInstalled = false
-
-function dispatchDocumentVisibility(): void {
-  for (const subscriber of visibilitySubscribers) subscriber()
-}
-
-function subscribeDocumentVisibility(subscriber: VisibilitySubscriber): () => void {
-  visibilitySubscribers.add(subscriber)
-  if (!visibilityListenerInstalled) {
-    globalThis.document.addEventListener('visibilitychange', dispatchDocumentVisibility)
-    visibilityListenerInstalled = true
-  }
-  return () => {
-    visibilitySubscribers.delete(subscriber)
-    if (visibilitySubscribers.size === 0 && visibilityListenerInstalled) {
-      globalThis.document.removeEventListener('visibilitychange', dispatchDocumentVisibility)
-      visibilityListenerInstalled = false
-    }
-  }
-}
 
 const props = defineProps<{
   source: string
@@ -62,9 +30,9 @@ const props = defineProps<{
   options?: CoverImageOptions
   role?: CoverImageRole
   /**
-   * Keep the DOM/layout slot, but detach the decoded image when it is well
-   * outside the application scroller.  This is opt-in because header artwork
-   * is intentionally persistent while dense result lists are not.
+   * Compatibility-only.  Visible artwork deliberately remains on the native
+   * browser image lifecycle; this prop must not change its source while a
+   * list scrolls or a kept-alive route activates/deactivates.
    */
   viewportUnload?: boolean
 }>()
@@ -81,54 +49,66 @@ const candidates = computed(() =>
     effectiveOptions.value,
   ),
 )
+// Vue may recreate the options object or reactivate a kept-alive tree without
+// changing the actual request URLs.  Reset only when the artwork candidate
+// sequence changes, so a stable source stays decoded and cacheable.
+const candidateSignature = computed(() => candidates.value.join('\n'))
 const imageElement = ref<globalThis.HTMLImageElement | null>(null)
 const candidateIndex = ref(0)
 const retryBudget = ref(1)
-const failed = ref(false)
 const retryAttempt = ref(0)
-const pageActive = ref(true)
-const documentVisible = ref(
-  typeof globalThis.document === 'undefined' || globalThis.document.visibilityState !== 'hidden',
-)
-const withinViewportBudget = ref(!props.viewportUnload)
-let observer: globalThis.IntersectionObserver | null = null
-let unsubscribeVisibility: (() => void) | null = null
-let budgetHandle: ReturnType<typeof registerCoverImageBudget> | null = null
+const failed = ref(false)
+const decoded = ref(false)
 
-const canRenderSource = computed(
-  () => pageActive.value && documentVisible.value && withinViewportBudget.value,
-)
-const currentSource = computed(() => {
-  if (!canRenderSource.value) return EMPTY_COVER_SRC
-  const candidate = candidates.value[candidateIndex.value]
-  if (!candidate || failed.value) return EMPTY_COVER_SRC
-  if (retryAttempt.value === 0) return candidate
+// Keep the browser's normal lazy-loading behavior while honoring an explicit
+// loading value supplied by a caller (for example, the player bar's eager
+// artwork).
+const loadingAttribute = computed<'lazy' | 'eager'>(() => {
+  const value = attrs.loading
+  return value === undefined || value === null ? 'lazy' : (String(value) as 'lazy' | 'eager')
+})
 
+function withRetryQuery(candidate: string, attempt: number): string {
+  if (attempt === 0) return candidate
   try {
     const url = new URL(candidate)
-    url.searchParams.set('clarus_retry', String(retryAttempt.value))
+    url.searchParams.set('clarus_retry', String(attempt))
     return url.toString()
   } catch {
-    return `${candidate}${candidate.includes('?') ? '&' : '?'}clarus_retry=${retryAttempt.value}`
+    return `${candidate}${candidate.includes('?') ? '&' : '?'}clarus_retry=${attempt}`
   }
+}
+
+/**
+ * The source is deliberately independent of viewport, scroll, document
+ * visibility, and KeepAlive activation state. Vue/browser lifecycle already
+ * owns the element; replacing it with a transparent GIF during those events
+ * causes WebKit to discard and recreate the decoded image on every return.
+ */
+const currentSource = computed(() => {
+  const candidate = candidates.value[candidateIndex.value]
+  // A transparent placeholder is reserved for actually missing or failed
+  // artwork.  It is never used as a lifecycle signal.
+  if (!candidate || failed.value) return EMPTY_COVER_SRC
+  return withRetryQuery(candidate, retryAttempt.value)
 })
-const coverState = computed(() =>
-  !canRenderSource.value
-    ? 'idle'
-    : failed.value || candidates.value.length === 0
-      ? 'failed'
-      : 'loading',
-)
+
+const coverState = computed(() => {
+  if (candidates.value.length === 0 || failed.value) return 'failed'
+  return decoded.value ? 'loaded' : 'loading'
+})
 
 function reset(): void {
   candidateIndex.value = 0
   retryBudget.value = 1
   retryAttempt.value = 0
   failed.value = false
+  decoded.value = false
 }
 
 function handleError(): void {
-  if (failed.value || !canRenderSource.value) return
+  if (failed.value) return
+  decoded.value = false
 
   if (retryBudget.value > 0 && candidateIndex.value === 0) {
     retryBudget.value = 0
@@ -142,184 +122,20 @@ function handleError(): void {
 }
 
 function handleLoad(): void {
-  retryAttempt.value = 0
-  const element = imageElement.value
-  if (
-    element === null ||
-    element.getAttribute('src') === EMPTY_COVER_SRC ||
-    !canRenderSource.value
-  ) {
-    budgetHandle?.markDecoded(false)
-    return
-  }
-  budgetHandle?.markDecoded(true)
-  budgetHandle?.touch()
-}
-
-function disconnectObserver(): void {
-  observer?.disconnect()
-  observer = null
-}
-
-/**
- * WKWebView keeps decoded remote images in compositor memory longer than the
- * element's Vue lifetime. Clearing the element synchronously gives its image
- * and GPU backing store a release point when a detail page is discarded or a
- * kept-alive page leaves the screen.
- */
-function detachDecodedImage(): void {
-  const element = imageElement.value
-  if (element === null) return
-  budgetHandle?.markDecoded(false)
-  element.src = EMPTY_COVER_SRC
-}
-
-function canReleaseFromBudget(): boolean {
-  return Boolean(
-    props.viewportUnload &&
-    pageActive.value &&
-    documentVisible.value &&
-    !withinViewportBudget.value,
-  )
-}
-
-function handleDocumentVisibilityChange(): void {
-  const visible = globalThis.document.visibilityState !== 'hidden'
-  documentVisible.value = visible
-  if (!visible) {
-    disconnectObserver()
-    budgetHandle?.setUnloadable(false)
-    detachDecodedImage()
-    return
-  }
-  void refreshViewportObservation()
-}
-
-function resolveScrollRoot(element: globalThis.HTMLImageElement): globalThis.Element | null {
-  return element.closest('.app-content')
-}
-
-function isNearViewport(
-  element: globalThis.HTMLImageElement,
-  root: globalThis.Element | null,
-): boolean {
-  const elementRect = element.getBoundingClientRect()
-  const rootRect = root?.getBoundingClientRect()
-  const top = rootRect?.top ?? 0
-  const bottom = rootRect?.bottom ?? window.innerHeight
-  const margin = Math.max(rootRect?.height ?? window.innerHeight, 1)
-  return elementRect.bottom >= top - margin && elementRect.top <= bottom + margin
-}
-
-function observeViewport(): void {
-  disconnectObserver()
-  if (!props.viewportUnload || !pageActive.value) {
-    withinViewportBudget.value = true
-    budgetHandle?.setUnloadable(canReleaseFromBudget())
-    return
-  }
-
-  const element = imageElement.value
-  if (element === null) return
-  const root = resolveScrollRoot(element)
-  if (typeof globalThis.IntersectionObserver === 'undefined') {
-    // Older WebKit builds should retain the existing eager behaviour rather
-    // than ever leaving a visible cover blank.
-    withinViewportBudget.value = true
-    budgetHandle?.setUnloadable(canReleaseFromBudget())
-    return
-  }
-
-  withinViewportBudget.value = isNearViewport(element, root)
-  budgetHandle?.setUnloadable(canReleaseFromBudget())
-  observer = new globalThis.IntersectionObserver(
-    (entries) => {
-      const entry = entries[0]
-      if (!entry) return
-      withinViewportBudget.value = entry.isIntersecting
-      budgetHandle?.setUnloadable(canReleaseFromBudget())
-      if (entry.isIntersecting) budgetHandle?.touch()
-    },
-    // Keep one half-screen of look-ahead so scrolling remains eager without
-    // decoding every card in a long, non-virtualized grid.
-    { root, rootMargin: '50% 0px', threshold: 0 },
-  )
-  observer.observe(element)
-}
-
-async function refreshViewportObservation(): Promise<void> {
-  await nextTick()
-  observeViewport()
+  // Keep a successful retry URL stable. Reverting it to the primary URL here
+  // would cause an unnecessary second request even though the image is loaded.
+  if (imageElement.value === null || failed.value || currentSource.value.length === 0) return
+  decoded.value = true
 }
 
 watch(
-  [
-    () => props.source,
-    () => props.width,
-    () => props.height,
-    () => props.role,
-    () => props.options?.allowOriginalFallback,
-    () => props.options?.exact,
-    () => props.options?.maxWidth,
-    () => props.options?.minWidth,
-    () => props.options?.pixelRatio,
-    () => props.options?.role,
-  ],
+  candidateSignature,
   () => {
-    // Replace the old source only after its decoded backing store has an
-    // explicit release point.  This matters when a single CoverImage instance
-    // is reused for successive route IDs or tracks.
-    detachDecodedImage()
-    budgetHandle?.touch()
+    // A changed source, rendered size, or role budget can change the actual
+    // request URLs.  Reset only in that case; scrolling and page lifecycle
+    // events never alter this signature.
     reset()
   },
   { flush: 'sync' },
 )
-watch(
-  () => props.viewportUnload,
-  () => void refreshViewportObservation(),
-)
-
-onMounted(() => {
-  budgetHandle = registerCoverImageBudget(() => {
-    const request = coverImageUrl(
-      props.source,
-      props.width,
-      props.height ?? props.width,
-      effectiveOptions.value,
-    )
-    if (!request) return 0
-    try {
-      const url = new URL(request)
-      const value = url.searchParams.get('param')?.match(/^(\d+)y(\d+)$/)
-      if (value) return Number(value[1]) * Number(value[2]) * 4
-    } catch {
-      // Fall through to the CSS dimensions for non-URL source strings.
-    }
-    return Math.max(1, props.width) * Math.max(1, props.height ?? props.width) * 4
-  }, detachDecodedImage)
-  budgetHandle.setUnloadable(canReleaseFromBudget())
-  unsubscribeVisibility = subscribeDocumentVisibility(handleDocumentVisibilityChange)
-  void refreshViewportObservation()
-})
-onActivated(() => {
-  pageActive.value = true
-  budgetHandle?.setUnloadable(canReleaseFromBudget())
-  void refreshViewportObservation()
-})
-onDeactivated(() => {
-  pageActive.value = false
-  withinViewportBudget.value = false
-  budgetHandle?.setUnloadable(false)
-  disconnectObserver()
-  detachDecodedImage()
-})
-onBeforeUnmount(() => {
-  disconnectObserver()
-  detachDecodedImage()
-  budgetHandle?.dispose()
-  budgetHandle = null
-  unsubscribeVisibility?.()
-  unsubscribeVisibility = null
-})
 </script>

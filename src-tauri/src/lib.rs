@@ -50,6 +50,7 @@ fn exit_app(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let audio_cache_state = audio_cache::AudioCacheState::default();
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
@@ -58,11 +59,14 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_plugin_macos_fps::init());
     builder
-        .manage(audio_cache::AudioCacheState::default())
+        .manage(audio_cache_state.clone())
         .manage(music_api::MusicApiState::default())
         .manage(settings::SettingsState::default())
         .manage(unblock::UnblockMusicState::default())
-        .setup(|app| {
+        .setup(move |app| {
+            audio_cache_state
+                .start_stream_server(app.handle())
+                .map_err(|error| anyhow::anyhow!("failed to start audio streaming: {error:?}"))?;
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -224,7 +228,6 @@ pub fn run() {
             catalog::search_catalog_page,
             catalog::resolve_stream_url,
             audio_cache::lookup_audio_cache,
-            audio_cache::read_audio_cache_bytes,
             audio_cache::store_audio_cache,
             audio_cache::release_audio_cache_lease,
             audio_cache::audio_cache_stats,

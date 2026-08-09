@@ -26,7 +26,6 @@
         :alt="row.item.name"
         loading="lazy"
         decoding="async"
-        viewport-unload
       />
       <span class="artist-copy">
         <strong>{{ row.item.name }}</strong>
@@ -53,6 +52,10 @@ const virtualRows = useFixedRowVirtualizer(
   computed(() => props.artists),
   {
     rowHeight: 46,
+    // Artist result collections are small enough to keep stable DOM/image
+    // nodes. Virtualizing them makes a scroll recycle <CoverImage> instances
+    // and defeats WebKit's normal HTTP/decode cache.
+    virtualizeAt: Number.POSITIVE_INFINITY,
     getItemKey: (artist) => artist.id,
   },
 )
@@ -89,8 +92,8 @@ const renderedRows = computed<readonly (FixedVirtualRow & { readonly item: Artis
   align-items: center;
   color: var(--color-text);
   background: transparent;
-  content-visibility: auto;
-  contain-intrinsic-size: 46px;
+  // Keep the image node in normal flow. Suspending it with
+  // content-visibility causes WebKit to restart lazy image loads on return.
   transition:
     color var(--motion-fast) ease,
     transform var(--motion-hover-emphasis) var(--ease-out);
@@ -98,10 +101,10 @@ const renderedRows = computed<readonly (FixedVirtualRow & { readonly item: Artis
 
   &.is-virtual-row {
     position: absolute;
-    top: 0;
+    top: var(--virtual-row-y);
     left: 0;
     width: 100%;
-    transform: translate3d(0, var(--virtual-row-y), 0);
+    transform: none;
     transition: none;
   }
 
@@ -124,7 +127,7 @@ const renderedRows = computed<readonly (FixedVirtualRow & { readonly item: Artis
   &.is-virtual-row:hover,
   &.is-virtual-row:focus-visible,
   &.is-virtual-row:active {
-    transform: translate3d(0, var(--virtual-row-y), 0);
+    transform: none;
   }
 
   img {

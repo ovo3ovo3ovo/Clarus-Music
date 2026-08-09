@@ -64,7 +64,6 @@
           :alt="tracks[row.index]!.album.name"
           loading="lazy"
           decoding="async"
-          viewport-unload
         />
       </RouterLink>
 
@@ -265,9 +264,8 @@ function observeVirtualizerGeometry(): void {
 }
 
 function rowStyle(row: TrackListRow): Record<string, string> {
-  // Keep virtual positioning composable with the hover scale.  Putting the
-  // translate in a custom property prevents a CSS transform from ever
-  // replacing the virtualizer's placement.
+  // Absolute top positioning avoids promoting every transient virtual row to
+  // a retained CoreAnimation surface while the native scroller moves.
   if (!isVirtualized.value) return {}
   return { '--track-row-y': `${row.start - scrollMargin.value}px` }
 }
@@ -378,7 +376,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
 .track-row {
   position: absolute;
   z-index: 0;
-  top: 0;
+  top: var(--track-row-y, 0px);
   left: 0;
   display: grid;
   width: 100%;
@@ -392,7 +390,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
   color: var(--color-text);
   background: transparent;
   contain: layout style;
-  transform: translate3d(0, var(--track-row-y), 0);
+  transform: none;
   user-select: none;
   transition:
     color var(--motion-fast) ease,
@@ -402,8 +400,9 @@ onBeforeUnmount(() => resizeObserver?.disconnect())
   .virtual-track-list:not(.is-virtualized) & {
     position: relative;
     transform: none;
-    content-visibility: auto;
-    contain-intrinsic-size: 46px;
+    // Native flow keeps the short-list image lifecycle stable. Long lists
+    // still use the explicit virtualizer above, without content-visibility
+    // adding another implicit unload/reload policy.
   }
 
   &.with-count {

@@ -10,7 +10,6 @@
           :alt="video.name"
           loading="lazy"
           decoding="async"
-          viewport-unload
         />
       </RouterLink>
       <RouterLink class="video-title" :to="`/mv/${video.id}`">{{ video.name }}</RouterLink>
@@ -39,8 +38,9 @@ defineProps<{ videos: readonly ArtistVideo[] }>()
   z-index: 0;
   min-width: 0;
   color: var(--color-text);
-  content-visibility: auto;
-  contain-intrinsic-size: auto 150px;
+  // Do not use content-visibility for artwork cards. In WKWebView it may
+  // suspend a lazy image and cause a second decode when the card re-enters
+  // the shared scroller; the native DOM remains stable instead.
   transform-origin: center;
   transition: transform var(--motion-hover-emphasis) var(--ease-out);
 

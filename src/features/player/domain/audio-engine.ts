@@ -4,7 +4,6 @@ export type AudioEngineState =
 export type AudioSource =
   | Readonly<{ kind: 'remote'; url: string }>
   | Readonly<{ kind: 'managed-url'; url: string; mimeType: string; release: () => void }>
-  | Readonly<{ kind: 'bytes'; bytes: ArrayBuffer; mimeType: string }>
 
 export function releaseAudioSource(source: AudioSource): void {
   if (source.kind === 'managed-url') source.release()

@@ -26,7 +26,6 @@
           :alt="track.album.name"
           loading="lazy"
           decoding="async"
-          viewport-unload
         />
       </RouterLink>
       <div class="track-copy">
@@ -158,8 +157,8 @@ function playFromContext(track: Track): void {
   align-items: center;
   color: var(--color-text);
   background: transparent;
-  content-visibility: auto;
-  contain-intrinsic-size: 54px;
+  // Keep row artwork in normal flow. WebKit can restart lazy image loading
+  // when content-visibility suspends a row in the shared scroller.
   transition: transform var(--motion-hover-emphasis) var(--ease-out);
   transform-origin: center;
 

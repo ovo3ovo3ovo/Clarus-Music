@@ -17,7 +17,7 @@ type ScrollElement = globalThis.HTMLElement
 export type FixedVirtualRow = Pick<VirtualItem, 'key' | 'index' | 'start'>
 
 export interface FixedRowVirtualizerOptions<Item> {
-  readonly rowHeight: number
+  readonly rowHeight: number | ComputedRef<number>
   readonly virtualizeAt?: number
   readonly overscan?: number
   readonly getItemKey?: (item: Item, index: number) => string | number
@@ -32,8 +32,8 @@ export function useFixedRowVirtualizer<Item>(
   items: ComputedRef<readonly Item[]>,
   {
     rowHeight,
-    virtualizeAt = 96,
-    overscan = 8,
+    virtualizeAt = 36,
+    overscan = 6,
     getItemKey = (_item: Item, index: number) => index,
   }: FixedRowVirtualizerOptions<Item>,
 ) {
@@ -42,6 +42,10 @@ export function useFixedRowVirtualizer<Item>(
   const scrollMargin = ref(0)
   const virtualizerActive = ref(true)
   let resizeObserver: globalThis.ResizeObserver | null = null
+
+  const resolvedRowHeight = computed(() =>
+    typeof rowHeight === 'number' ? rowHeight : rowHeight.value,
+  )
 
   const isVirtualized = computed(() => items.value.length >= virtualizeAt)
 
@@ -58,7 +62,7 @@ export function useFixedRowVirtualizer<Item>(
       enabled: isVirtualized.value,
       getScrollElement: () =>
         virtualizerActive.value ? (scrollElement.value ?? resolveScrollElement()) : null,
-      estimateSize: () => rowHeight,
+      estimateSize: () => resolvedRowHeight.value,
       getItemKey: (index: number) => {
         const item = items.value[index]
         return item === undefined ? index : getItemKey(item, index)
@@ -72,7 +76,7 @@ export function useFixedRowVirtualizer<Item>(
     items.value.map((item, index) => ({
       key: getItemKey(item, index),
       index,
-      start: index * rowHeight,
+      start: index * resolvedRowHeight.value,
     })),
   )
   const visibleRows = computed<readonly FixedVirtualRow[]>(() =>

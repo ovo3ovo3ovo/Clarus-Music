@@ -1,50 +1,36 @@
 <template>
-  <div
-    :ref="virtualRows.listRoot"
-    class="artist-album-grid"
-    :class="{ 'is-virtualized': isVirtualized }"
-    :style="listStyle"
-    role="list"
-  >
-    <article
-      v-for="row in renderedRows"
-      :key="String(row.key)"
-      class="album-card"
-      :class="{ 'is-virtual-row': isVirtualized }"
-      :style="rowStyle(row)"
-      role="listitem"
-    >
-      <RouterLink class="cover-link" :to="`/album/${row.item.id}`" :aria-label="row.item.name">
+  <div class="artist-album-grid" role="list">
+    <article v-for="album in albums" :key="album.id" class="album-card" role="listitem">
+      <RouterLink class="cover-link" :to="`/album/${album.id}`" :aria-label="album.name">
         <CoverImage
-          :source="row.item.coverUrl"
+          :source="album.coverUrl"
           :width="40"
           role="row"
-          :alt="row.item.name"
+          :alt="album.name"
           loading="lazy"
           decoding="async"
-          viewport-unload
         />
       </RouterLink>
 
       <div class="album-copy">
-        <RouterLink class="album-title" :to="`/album/${row.item.id}`" :title="row.item.name">
-          <span>{{ row.item.name }}</span>
-          <AppIcon v-if="row.item.explicit" class="explicit" name="explicit" />
+        <RouterLink class="album-title" :to="`/album/${album.id}`" :title="album.name">
+          <span>{{ album.name }}</span>
+          <AppIcon v-if="album.explicit" class="explicit" name="explicit" />
         </RouterLink>
-        <span class="mobile-meta">{{ mobileMeta(row.item) }}</span>
+        <span class="mobile-meta">{{ mobileMeta(album) }}</span>
       </div>
 
-      <span class="album-subtitle">{{ subtitle(row.item) }}</span>
-      <span class="album-count">{{ trackCount(row.item) }}</span>
+      <span class="album-subtitle">{{ subtitle(album) }}</span>
+      <span class="album-count">{{ trackCount(album) }}</span>
       <button
         class="play-album"
         type="button"
         :title="t('artist.playAlbum')"
         :aria-label="t('artist.playAlbum')"
         :disabled="busyAlbumId !== null"
-        @click="emit('play', row.item)"
+        @click="emit('play', album)"
       >
-        <span v-if="busyAlbumId === row.item.id" class="spinner" aria-hidden="true"></span>
+        <span v-if="busyAlbumId === album.id" class="spinner" aria-hidden="true"></span>
         <AppIcon v-else name="play" />
       </button>
     </article>
@@ -52,15 +38,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import AppIcon from '@/components/common/AppIcon.vue'
 import CoverImage from '@/components/common/CoverImage.vue'
-import {
-  useFixedRowVirtualizer,
-  type FixedVirtualRow,
-} from '@/components/common/use-fixed-row-virtualizer'
 import { formatArtistAlbumType, type ArtistAlbum } from '../domain/artist'
 
 const props = withDefaults(
@@ -73,20 +54,6 @@ const props = withDefaults(
 )
 const emit = defineEmits<{ play: [album: ArtistAlbum] }>()
 const { t, locale } = useI18n()
-const virtualRows = useFixedRowVirtualizer(
-  computed(() => props.albums),
-  {
-    rowHeight: 54,
-    getItemKey: (album) => album.id,
-  },
-)
-const { isVirtualized, listStyle, rowStyle } = virtualRows
-const renderedRows = computed<readonly (FixedVirtualRow & { readonly item: ArtistAlbum })[]>(() =>
-  virtualRows.visibleRows.value.flatMap((row) => {
-    const item = props.albums[row.index]
-    return item === undefined ? [] : [{ ...row, item }]
-  }),
-)
 
 function subtitle(album: ArtistAlbum): string {
   const year = new Date(album.publishTime).getFullYear()
@@ -108,12 +75,6 @@ function mobileMeta(album: ArtistAlbum): string {
 .artist-album-grid {
   display: grid;
   width: 100%;
-
-  &.is-virtualized {
-    position: relative;
-    display: block;
-    contain: layout style;
-  }
 }
 
 .album-card {
@@ -128,19 +89,12 @@ function mobileMeta(album: ArtistAlbum): string {
   align-items: center;
   color: var(--color-text);
   background: transparent;
-  content-visibility: auto;
-  contain-intrinsic-size: 54px;
+  // Keep every item and its <img> in normal flow. WebKit's
+  // content-visibility implementation can suspend lazy images in a long
+  // scroller and make them request/decode again when they re-enter view.
+  // Stable DOM is the same resource-lifetime model used by YesPlayMusic.
   transition: transform var(--motion-hover-emphasis) var(--ease-out);
   transform-origin: center;
-
-  &.is-virtual-row {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    transform: translate3d(0, var(--virtual-row-y), 0);
-    transition: none;
-  }
 
   &:hover {
     background: transparent;
@@ -156,12 +110,6 @@ function mobileMeta(album: ArtistAlbum): string {
 
   &:active {
     transform: scale(var(--scale-hover-row));
-  }
-
-  &.is-virtual-row:hover,
-  &.is-virtual-row:focus-within,
-  &.is-virtual-row:active {
-    transform: translate3d(0, var(--virtual-row-y), 0);
   }
 }
 

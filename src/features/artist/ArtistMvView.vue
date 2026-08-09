@@ -9,7 +9,7 @@
       <h1>
         <CoverImage
           :source="artist.coverUrl"
-          :width="40"
+          :width="44"
           role="avatar"
           :alt="artist.name"
           decoding="async"

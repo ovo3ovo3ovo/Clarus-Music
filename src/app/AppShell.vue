@@ -8,16 +8,29 @@
       :class="{ 'has-back-navigation': hasBackNavigation }"
     >
       <RouterView v-slot="{ Component, route: viewRoute }">
-        <!-- Keep only the bounded daily surface alive. Library and playlist
-          routes can contain user-sized collections, so their component trees
-          must be destroyed when leaving the route. -->
+        <!-- Keep one non-artist surface (currently daily songs) alive. -->
         <KeepAlive :max="1">
           <component
             :is="Component"
-            v-if="viewRoute.meta.keepAlive"
+            v-if="viewRoute.meta.keepAlive && viewRoute.meta.cacheKey !== ARTIST_CACHE_KEY"
             :key="String(viewRoute.meta.cacheKey ?? viewRoute.name ?? viewRoute.path)"
           />
         </KeepAlive>
+
+        <!--
+          Artist navigation reuses one keyed component while the route stays
+          in the artist family. Keying the boundary itself makes leaving the
+          family unmount the KeepAlive cache, releasing hidden list and image
+          references instead of retaining a deactivated artist tree.
+        -->
+        <KeepAlive
+          v-if="viewRoute.meta.keepAlive && viewRoute.meta.cacheKey === ARTIST_CACHE_KEY"
+          key="artist-route-cache"
+          :max="1"
+        >
+          <component :is="Component" v-if="viewRoute.meta.keepAlive" :key="ARTIST_CACHE_KEY" />
+        </KeepAlive>
+
         <component :is="Component" v-if="!viewRoute.meta.keepAlive" :key="viewRoute.fullPath" />
       </RouterView>
     </main>
@@ -48,6 +61,7 @@ import { desktop } from '@/platform/desktop'
 import { installWindowDrag } from '@/platform/window-drag'
 
 const LyricsOverlay = defineAsyncComponent(() => import('@/features/lyrics/LyricsOverlay.vue'))
+const ARTIST_CACHE_KEY = 'artist'
 const lyricsStore = useLyricsStore()
 const player = usePlayerStore()
 const route = useRoute()
