@@ -11,7 +11,8 @@
       <span class="artist-number">{{ index + 1 }}</span>
       <CoverImage
         :source="artist.coverUrl"
-        :width="128"
+        :width="36"
+        role="avatar"
         :alt="artist.name"
         loading="lazy"
         decoding="async"

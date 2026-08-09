@@ -21,7 +21,13 @@
           @click="playFirst"
         >
           <span class="cover-shadow" :style="coverStyle"></span>
-          <CoverImage :source="detail.coverUrl" :width="1024" :alt="detail.name" decoding="async" />
+          <CoverImage
+            :source="detail.coverUrl"
+            :width="232"
+            role="hero"
+            :alt="detail.name"
+            decoding="async"
+          />
           <span class="cover-play"><AppIcon name="play" /></span>
         </button>
 
@@ -202,7 +208,7 @@ const albumId = computed(() => parsePositiveIntegerRouteParam(route.params.id))
 const tracks = computed(() => (detail.value ? flattenAlbumTracks(detail.value.discs) : []))
 const albumTitle = computed(() => splitAlbumTitle(detail.value?.name ?? ''))
 const sourceKey = computed(() => `album:${albumId.value ?? 0}`)
-const coverUrl = computed(() => imageUrl(detail.value?.coverUrl ?? '', 1024))
+const coverUrl = computed(() => imageUrl(detail.value?.coverUrl ?? '', 232))
 const coverStyle = computed(() => ({ '--cover-image': `url(${JSON.stringify(coverUrl.value)})` }))
 const busy = computed(
   () => busyTrackId.value !== null || tracks.value.every((track) => !track.playable),
@@ -226,7 +232,7 @@ const humanDuration = computed(() => {
 })
 
 function imageUrl(source: string, size: number): string {
-  return coverImageUrl(source, size)
+  return coverImageUrl(source, size, size, { role: 'hero' })
 }
 
 function message(reason: unknown): string {

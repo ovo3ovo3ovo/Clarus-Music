@@ -6,6 +6,7 @@
           :source="video.coverUrl"
           :width="464"
           :height="260"
+          role="video-card"
           :alt="video.name"
           loading="lazy"
           decoding="async"

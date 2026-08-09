@@ -15,7 +15,8 @@
       <header class="artist-header">
         <CoverImage
           :source="detail.artist.coverUrl"
-          :width="512"
+          :width="220"
+          role="hero"
           :alt="detail.artist.name"
           decoding="async"
         />
@@ -91,7 +92,8 @@
             <RouterLink class="release-cover square" :to="`/album/${detail.latestRelease.id}`">
               <CoverImage
                 :source="detail.latestRelease.coverUrl"
-                :width="256"
+                :width="128"
+                role="card"
                 :alt="detail.latestRelease.name"
                 loading="lazy"
                 decoding="async"
@@ -112,8 +114,9 @@
             <RouterLink class="release-cover video" :to="`/mv/${latestVideo.id}`">
               <CoverImage
                 :source="latestVideo.coverUrl"
-                :width="464"
-                :height="260"
+                :width="228"
+                :height="128"
+                role="video-card"
                 :alt="latestVideo.name"
                 loading="lazy"
                 decoding="async"
@@ -149,7 +152,15 @@
 
       <section v-if="detail.albums.length" ref="albumsSection" class="content-section">
         <h2>{{ t('artist.albums') }}</h2>
-        <ArtistAlbumGrid :albums="detail.albums" :busy-album-id="busyAlbumId" @play="playAlbum" />
+        <ArtistAlbumGrid :albums="visibleAlbums" :busy-album-id="busyAlbumId" @play="playAlbum" />
+        <button
+          v-if="visibleAlbums.length < detail.albums.length"
+          class="show-more"
+          type="button"
+          @click="albumLimit += ARTIST_OVERVIEW_PAGE_SIZE"
+        >
+          {{ t('artist.showMore') }}
+        </button>
       </section>
 
       <section v-if="detail.videos.length" ref="videosSection" class="content-section">
@@ -159,17 +170,33 @@
             {{ t('artist.seeMore') }}
           </RouterLink>
         </h2>
-        <ArtistVideoGrid :videos="detail.videos" />
+        <ArtistVideoGrid :videos="visibleVideos" />
+        <button
+          v-if="visibleVideos.length < detail.videos.length"
+          class="show-more"
+          type="button"
+          @click="videoLimit += ARTIST_OVERVIEW_PAGE_SIZE"
+        >
+          {{ t('artist.showMore') }}
+        </button>
       </section>
 
       <section v-if="detail.eps.length" class="content-section">
         <h2>{{ t('artist.epsSingles') }}</h2>
         <ArtistAlbumGrid
-          :albums="detail.eps"
+          :albums="visibleEps"
           :busy-album-id="busyAlbumId"
           subtitle-mode="albumTypeReleaseYear"
           @play="playAlbum"
         />
+        <button
+          v-if="visibleEps.length < detail.eps.length"
+          class="show-more"
+          type="button"
+          @click="epLimit += ARTIST_OVERVIEW_PAGE_SIZE"
+        >
+          {{ t('artist.showMore') }}
+        </button>
       </section>
 
       <section v-if="similarCards.length" class="content-section similar-artists">
@@ -220,6 +247,9 @@ import { NativeArtistGateway } from './infrastructure/native-artist'
 import ArtistAlbumGrid from './presentation/ArtistAlbumGrid.vue'
 import ArtistVideoGrid from './presentation/ArtistVideoGrid.vue'
 
+const ARTIST_OVERVIEW_INITIAL_LIMIT = 12
+const ARTIST_OVERVIEW_PAGE_SIZE = 24
+
 const route = useRoute()
 const router = useRouter()
 const { t, locale } = useI18n()
@@ -238,6 +268,9 @@ const loadError = shallowRef<string | null>(null)
 const operationError = shallowRef<string | null>(null)
 const feedback = shallowRef<string | null>(null)
 const showMorePopular = ref(false)
+const albumLimit = ref(ARTIST_OVERVIEW_INITIAL_LIMIT)
+const epLimit = ref(ARTIST_OVERVIEW_INITIAL_LIMIT)
+const videoLimit = ref(ARTIST_OVERVIEW_INITIAL_LIMIT)
 const descriptionOpen = ref(false)
 const menuOpen = ref(false)
 const menuRoot = ref<ReturnType<typeof document.querySelector>>(null)
@@ -253,6 +286,9 @@ const latestVideo = computed(() => detail.value?.videos[0] ?? null)
 const visiblePopularTracks = computed(
   () => detail.value?.popularTracks.slice(0, showMorePopular.value ? 24 : 12) ?? [],
 )
+const visibleAlbums = computed(() => detail.value?.albums.slice(0, albumLimit.value) ?? [])
+const visibleEps = computed(() => detail.value?.eps.slice(0, epLimit.value) ?? [])
+const visibleVideos = computed(() => detail.value?.videos.slice(0, videoLimit.value) ?? [])
 const busy = computed(
   () =>
     busyTrackId.value !== null ||
@@ -303,6 +339,9 @@ async function loadDetail(): Promise<void> {
   operationError.value = null
   feedback.value = null
   showMorePopular.value = false
+  albumLimit.value = ARTIST_OVERVIEW_INITIAL_LIMIT
+  epLimit.value = ARTIST_OVERVIEW_INITIAL_LIMIT
+  videoLimit.value = ARTIST_OVERVIEW_INITIAL_LIMIT
   descriptionOpen.value = false
   menuOpen.value = false
   try {
@@ -463,6 +502,7 @@ onMounted(() => {
   document.addEventListener('keydown', closeTransientUi)
 })
 onBeforeUnmount(() => {
+  detail.value = null
   detailController?.abort('Artist view disposed')
   playbackController?.abort('Artist view disposed')
   subscriptionController?.abort('Artist view disposed')

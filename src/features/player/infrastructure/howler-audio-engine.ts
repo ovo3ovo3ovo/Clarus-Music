@@ -67,6 +67,7 @@ export class HowlerAudioEngine implements AudioEngine {
   private ownedObjectUrl: string | null = null
   private ownedRelease: (() => void) | null = null
   private loadController: AbortController | null = null
+  private mediaNode: HTMLAudioElement | null = null
   private outputDeviceId = 'default'
   private desiredVolume = 1
   private sourceFormat = 'mp3'
@@ -130,6 +131,7 @@ export class HowlerAudioEngine implements AudioEngine {
           onload: () => {
             cleanup()
             if (this.howl !== howl || controller.signal.aborted) return
+            this.bindMediaTimeUpdates(howl)
             this.setState('ready')
             this.emit('duration', this.duration)
             void this.applyOutputDevice().catch((reason: unknown) => {
@@ -174,6 +176,7 @@ export class HowlerAudioEngine implements AudioEngine {
           },
         })
         this.howl = howl
+        this.bindMediaTimeUpdates(howl)
       })
     } catch (error) {
       if (this.loadController === controller) this.releaseSource()
@@ -281,6 +284,8 @@ export class HowlerAudioEngine implements AudioEngine {
   }
 
   private releaseSource(): void {
+    this.mediaNode?.removeEventListener('timeupdate', this.handleTimeUpdate)
+    this.mediaNode = null
     this.howl?.unload()
     this.howl = null
     if (this.ownedObjectUrl !== null) {
@@ -290,6 +295,18 @@ export class HowlerAudioEngine implements AudioEngine {
     const release = this.ownedRelease
     this.ownedRelease = null
     release?.()
+  }
+
+  private readonly handleTimeUpdate = (): void => {
+    this.emit('time', this.currentTime)
+  }
+
+  private bindMediaTimeUpdates(howl: Howl): void {
+    const node = (howl as HowlWithHtml5Sounds)._sounds?.[0]?._node
+    if (node === undefined || node === this.mediaNode) return
+    this.mediaNode?.removeEventListener('timeupdate', this.handleTimeUpdate)
+    this.mediaNode = node
+    node.addEventListener('timeupdate', this.handleTimeUpdate, { passive: true })
   }
 
   private setState(state: AudioEngineState): void {

@@ -20,7 +20,8 @@
       >
         <CoverImage
           :source="track.album.coverUrl"
-          :width="224"
+          :width="40"
+          role="row"
           :alt="track.album.name"
           loading="lazy"
           decoding="async"

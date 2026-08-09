@@ -137,7 +137,7 @@ function applyVideoSource(current: MusicVideoDetail): void {
   videoPlayer.source = {
     type: 'video',
     title: current.name,
-    poster: coverImageUrl(current.coverUrl, 960, 540),
+    poster: coverImageUrl(current.coverUrl, 960, 540, { role: 'video' }),
     sources: current.sources.map((source) => ({
       src: source.url,
       type: source.mimeType,

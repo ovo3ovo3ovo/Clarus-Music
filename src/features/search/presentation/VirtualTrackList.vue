@@ -52,7 +52,8 @@
       >
         <CoverImage
           :source="tracks[row.index]!.album.coverUrl"
-          :width="224"
+          :width="36"
+          role="row"
           :alt="tracks[row.index]!.album.name"
           loading="lazy"
           decoding="async"

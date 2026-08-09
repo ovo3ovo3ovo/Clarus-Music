@@ -4,7 +4,8 @@
       <RouterLink class="cover-link" :to="`/album/${album.id}`" :aria-label="album.name">
         <CoverImage
           :source="album.coverUrl"
-          :width="128"
+          :width="40"
+          role="row"
           :alt="album.name"
           loading="lazy"
           decoding="async"

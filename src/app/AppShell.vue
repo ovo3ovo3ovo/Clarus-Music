@@ -15,7 +15,11 @@
             :key="String(viewRoute.meta.cacheKey ?? viewRoute.name ?? viewRoute.path)"
           />
         </KeepAlive>
-        <component :is="Component" v-if="!viewRoute.meta.keepAlive" :key="viewRoute.fullPath" />
+        <component
+          :is="Component"
+          v-if="!viewRoute.meta.keepAlive"
+          :key="viewRoute.name === 'artist' ? 'artist' : viewRoute.fullPath"
+        />
       </RouterView>
     </main>
     <PlayerBar />

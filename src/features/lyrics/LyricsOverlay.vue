@@ -39,7 +39,14 @@
     <div class="left-side">
       <div class="player-panel">
         <div class="cover-wrap">
-          <CoverImage class="cover" :source="coverSource" :width="1024" alt="" decoding="async" />
+          <CoverImage
+            class="cover"
+            :source="coverSource"
+            :width="580"
+            role="immersive"
+            alt=""
+            decoding="async"
+          />
           <div class="cover-shadow" :style="coverShadowStyle" />
         </div>
 
@@ -276,7 +283,7 @@ let seekCommitFrame: number | null = null
 // presented immediately while its stream and lyrics resolve in parallel.
 const track = computed(() => player.pendingTrack ?? player.currentTrack)
 const coverSource = computed(() => track.value?.album.coverUrl ?? '')
-const coverUrl = computed(() => coverImageUrl(coverSource.value, 1024))
+const coverUrl = computed(() => coverImageUrl(coverSource.value, 580, 580, { role: 'immersive' }))
 const trackSubtitle = computed(() => {
   if (!track.value) return ''
   const artists = formatArtists(track.value.artists)
@@ -930,12 +937,9 @@ function ensureLyricClock(): void {
       : typeof player.readCurrentTime === 'function'
         ? player.readCurrentTime
         : null
-  stopLyricSubscription = playbackFrameScheduler.subscribe(
-    ({ timestamp, currentTime }) => {
-      tickLyricClock(timestamp, currentTime)
-    },
-    playbackClock,
-  )
+  stopLyricSubscription = playbackFrameScheduler.subscribe(({ timestamp, currentTime }) => {
+    tickLyricClock(timestamp, currentTime)
+  }, playbackClock)
 }
 
 function tickLyricClock(timestamp: number, currentTimeSeconds = Number.NaN): void {

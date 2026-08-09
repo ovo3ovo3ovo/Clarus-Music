@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
 use ncm_api_rs::{create_client, ApiClient, NcmError, Query};
@@ -21,6 +22,15 @@ struct ActiveRequest {
     abort_handle: AbortHandle,
 }
 
+#[derive(Default)]
+struct RequestRegistry {
+    active: HashMap<String, ActiveRequest>,
+    cancelled_before_start: HashMap<String, Instant>,
+}
+
+const CANCELLATION_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
+const MAX_CANCELLATION_TOMBSTONES: usize = 1_024;
+
 struct NetworkContext {
     client: ApiClient,
     real_ip: Option<String>,
@@ -29,7 +39,7 @@ struct NetworkContext {
 pub struct MusicApiState {
     network: RwLock<NetworkContext>,
     session_cookie: Arc<RwLock<Option<Zeroizing<String>>>>,
-    active_requests: Mutex<HashMap<String, ActiveRequest>>,
+    requests: Mutex<RequestRegistry>,
     next_request_token: AtomicU64,
 }
 
@@ -41,7 +51,7 @@ impl Default for MusicApiState {
                 real_ip: None,
             }),
             session_cookie: Arc::new(RwLock::new(None)),
-            active_requests: Mutex::new(HashMap::new()),
+            requests: Mutex::new(RequestRegistry::default()),
             next_request_token: AtomicU64::new(1),
         }
     }
@@ -128,6 +138,23 @@ impl ApiFailure {
 }
 
 impl MusicApiState {
+    fn prune_cancellation_tombstones(registry: &mut RequestRegistry, now: Instant) {
+        registry
+            .cancelled_before_start
+            .retain(|_, created| now.duration_since(*created) <= CANCELLATION_TOMBSTONE_TTL);
+        while registry.cancelled_before_start.len() >= MAX_CANCELLATION_TOMBSTONES {
+            let Some(oldest) = registry
+                .cancelled_before_start
+                .iter()
+                .min_by_key(|(_, created)| **created)
+                .map(|(request_id, _)| request_id.clone())
+            else {
+                break;
+            };
+            registry.cancelled_before_start.remove(&oldest);
+        }
+    }
+
     pub(crate) fn build_client(proxy_url: Option<&str>) -> Result<ApiClient, ApiFailure> {
         match proxy_url {
             Some(proxy_url) => ApiClient::with_proxy(None, proxy_url).map_err(ApiFailure::from_ncm),
@@ -176,27 +203,35 @@ impl MusicApiState {
         }
 
         let token = self.next_request_token.fetch_add(1, Ordering::Relaxed);
-        let task = tokio::spawn(operation);
-        let active = ActiveRequest {
-            token,
-            abort_handle: task.abort_handle(),
+        let task = {
+            let mut requests = self.requests.lock().await;
+            Self::prune_cancellation_tombstones(&mut requests, Instant::now());
+            if requests
+                .cancelled_before_start
+                .remove(&request_id)
+                .is_some()
+            {
+                return Err(ApiFailure::cancelled());
+            }
+            let task = tokio::spawn(operation);
+            let active = ActiveRequest {
+                token,
+                abort_handle: task.abort_handle(),
+            };
+            if let Some(previous) = requests.active.insert(request_id.clone(), active) {
+                previous.abort_handle.abort();
+            }
+            task
         };
-        if let Some(previous) = self
-            .active_requests
-            .lock()
-            .await
-            .insert(request_id.clone(), active)
-        {
-            previous.abort_handle.abort();
-        }
 
         let result = task.await;
-        let mut requests = self.active_requests.lock().await;
+        let mut requests = self.requests.lock().await;
         if requests
+            .active
             .get(&request_id)
             .is_some_and(|active| active.token == token)
         {
-            requests.remove(&request_id);
+            requests.active.remove(&request_id);
         }
         drop(requests);
 
@@ -204,6 +239,24 @@ impl MusicApiState {
             Ok(result) => result,
             Err(error) if error.is_cancelled() => Err(ApiFailure::cancelled()),
             Err(error) => Err(ApiFailure::task_failed(error.to_string())),
+        }
+    }
+
+    async fn cancel_request(&self, request_id: String) -> Result<bool, ApiFailure> {
+        if request_id.is_empty() || request_id.len() > 128 {
+            return Err(ApiFailure::invalid(
+                "requestId must contain between 1 and 128 bytes",
+            ));
+        }
+        let mut requests = self.requests.lock().await;
+        let now = Instant::now();
+        Self::prune_cancellation_tombstones(&mut requests, now);
+        if let Some(active) = requests.active.remove(&request_id) {
+            active.abort_handle.abort();
+            Ok(true)
+        } else {
+            requests.cancelled_before_start.insert(request_id, now);
+            Ok(false)
         }
     }
 }
@@ -225,11 +278,5 @@ pub async fn cancel_music_request(
     request_id: String,
     state: State<'_, MusicApiState>,
 ) -> Result<bool, ApiFailure> {
-    let active = state.active_requests.lock().await.remove(&request_id);
-    if let Some(active) = active {
-        active.abort_handle.abort();
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    state.cancel_request(request_id).await
 }

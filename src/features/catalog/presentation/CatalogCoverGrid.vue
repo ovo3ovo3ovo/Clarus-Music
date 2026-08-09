@@ -9,7 +9,8 @@
       <RouterLink class="cover-link" :to="`/${item.kind}/${item.id}`" :aria-label="item.name">
         <CoverImage
           :source="item.coverUrl"
-          :width="128"
+          :width="40"
+          role="row"
           :alt="item.name"
           loading="lazy"
           decoding="async"

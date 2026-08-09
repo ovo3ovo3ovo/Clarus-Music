@@ -4,7 +4,8 @@
       <RouterLink class="cover-link" :to="`/playlist/${playlist.id}`" :aria-label="playlist.name">
         <CoverImage
           :source="playlist.coverUrl"
-          :width="128"
+          :width="40"
+          role="row"
           :alt="playlist.name"
           loading="lazy"
           decoding="async"

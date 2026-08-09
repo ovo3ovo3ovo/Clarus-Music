@@ -7,7 +7,13 @@
     </div>
     <template v-else-if="artist">
       <h1>
-        <CoverImage :source="artist.coverUrl" :width="96" :alt="artist.name" decoding="async" />
+        <CoverImage
+          :source="artist.coverUrl"
+          :width="44"
+          role="avatar"
+          :alt="artist.name"
+          decoding="async"
+        />
         <span>{{ t('artist.videoTitle', { name: artist.name }) }}</span>
       </h1>
       <ArtistVideoGrid v-if="videos.length" :videos="videos" />

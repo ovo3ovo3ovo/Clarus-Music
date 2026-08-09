@@ -17,7 +17,8 @@
           <CoverImage
             v-if="authStore.session.user?.avatarUrl"
             :source="authStore.session.user.avatarUrl"
-            :width="96"
+            :width="44"
+            role="avatar"
             alt=""
             decoding="async"
           />
@@ -135,7 +136,13 @@
           @click="playFirst"
         >
           <span class="cover-shadow" :style="coverStyle"></span>
-          <CoverImage :source="detail.coverUrl" :width="1024" :alt="detail.name" decoding="async" />
+          <CoverImage
+            :source="detail.coverUrl"
+            :width="232"
+            role="hero"
+            :alt="detail.name"
+            decoding="async"
+          />
           <span class="cover-play"><AppIcon name="play" /></span>
         </button>
 
@@ -523,7 +530,7 @@ const canEdit = computed(
     detail.value !== null &&
     detail.value.creator.userId === authStore.session.user?.userId,
 )
-const coverUrl = computed(() => imageUrl(detail.value?.coverUrl ?? '', 1024))
+const coverUrl = computed(() => imageUrl(detail.value?.coverUrl ?? '', 232))
 const coverStyle = computed(() => ({ '--cover-image': `url(${JSON.stringify(coverUrl.value)})` }))
 const creatorUrl = computed(
   () => `https://music.163.com/#/user/home?id=${detail.value?.creator.userId ?? 0}`,
@@ -535,7 +542,7 @@ const formattedDate = computed(() =>
 )
 
 function imageUrl(source: string, size: number): string {
-  return coverImageUrl(source, size)
+  return coverImageUrl(source, size, size, { role: 'hero' })
 }
 
 function message(reason: unknown): string {

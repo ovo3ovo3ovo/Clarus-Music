@@ -126,7 +126,6 @@ export function createPlayerStore(
     let navigationController: AbortController | null = null
     let likeController: AbortController | null = null
     let likeStateVersion = 0
-    let stopProgressSubscription: (() => void) | null = null
     const playing = computed(() => state.value === 'playing')
     const enabled = computed(() => currentTrack.value !== null)
     const upcomingTracks = computed(() =>
@@ -234,24 +233,6 @@ export function createPlayerStore(
     const playbackClock = markRaw({ read: () => engine.currentTime })
     const releasePlaybackClock = playbackFrameScheduler.setClock(playbackClock.read)
 
-    const stopProgressClock = () => {
-      stopProgressSubscription?.()
-      stopProgressSubscription = null
-    }
-
-    const tickProgress = ({ currentTime }: { readonly currentTime: number }) => {
-      if (Number.isFinite(currentTime)) progress.value = currentTime
-    }
-
-    const syncProgressClock = () => {
-      stopProgressClock()
-      if (playing.value && !document.hidden) {
-        stopProgressSubscription = playbackFrameScheduler.subscribe(tickProgress, playbackClock.read)
-      } else {
-        playbackFrameScheduler.wake()
-      }
-    }
-
     const syncMediaPosition = (position = engine.currentTime) => {
       const track = currentTrack.value
       if (track === null) {
@@ -276,7 +257,7 @@ export function createPlayerStore(
     const unsubscribers = [
       engine.subscribe('state', (value) => {
         state.value = value
-        syncProgressClock()
+        playbackFrameScheduler.wake()
         syncMediaPlaybackState(value)
         syncMediaPosition()
         if (value === 'ended') void advance('next', 'ended')
@@ -286,7 +267,7 @@ export function createPlayerStore(
         syncMediaPosition()
       }),
       engine.subscribe('time', (value) => {
-        if (!playing.value) progress.value = value
+        if (Number.isFinite(value)) progress.value = value
         syncMediaPosition(value)
       }),
       engine.subscribe('seeked', (value) => {
@@ -302,7 +283,7 @@ export function createPlayerStore(
       }),
     ]
 
-    const handleVisibilityChange = () => syncProgressClock()
+    const handleVisibilityChange = () => playbackFrameScheduler.wake()
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
     async function loadAudio(
@@ -333,7 +314,7 @@ export function createPlayerStore(
         sourceTransferred = true
         if (activeLoad.value !== controller) return
         currentTrack.value = track
-        preloadCoverImages(track.album.coverUrl)
+        preloadCoverImages(track.album.coverUrl, { width: 160, role: 'player' })
         restoredTrackPending = false
         restoredProgress = 0
         refreshLikeState(track)
@@ -759,7 +740,6 @@ export function createPlayerStore(
       activeLoad.value?.abort('Player disposed')
       activeLoad.value = null
       cancelLike('Player disposed')
-      stopProgressClock()
       releasePlaybackClock()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       for (const unsubscribe of unsubscribers) unsubscribe()

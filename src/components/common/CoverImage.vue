@@ -10,7 +10,11 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { coverImageCandidates, type CoverImageOptions } from '@/platform/cover-image'
+import {
+  coverImageCandidates,
+  type CoverImageOptions,
+  type CoverImageRole,
+} from '@/platform/cover-image'
 
 defineOptions({ inheritAttrs: false })
 
@@ -21,10 +25,14 @@ const props = defineProps<{
   width: number
   height?: number
   options?: CoverImageOptions
+  role?: CoverImageRole
 }>()
 
 const candidates = computed(() =>
-  coverImageCandidates(props.source, props.width, props.height ?? props.width, props.options),
+  coverImageCandidates(props.source, props.width, props.height ?? props.width, {
+    ...props.options,
+    ...(props.role ? { role: props.role } : {}),
+  }),
 )
 const candidateIndex = ref(0)
 const retryBudget = ref(1)
@@ -72,5 +80,14 @@ function handleLoad(): void {
   retryAttempt.value = 0
 }
 
-watch([() => props.source, () => props.width, () => props.height, () => props.options], reset)
+watch(
+  [
+    () => props.source,
+    () => props.width,
+    () => props.height,
+    () => props.options,
+    () => props.role,
+  ],
+  reset,
+)
 </script>

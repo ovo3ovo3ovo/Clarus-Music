@@ -49,6 +49,7 @@ function artworkUrl(url: string, size: number): string {
     maxWidth: size,
     minWidth: size,
     pixelRatio: 1,
+    role: 'media-session',
   })
 }
 

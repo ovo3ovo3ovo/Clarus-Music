@@ -7,6 +7,7 @@
           :source="video.coverUrl"
           :width="464"
           :height="260"
+          role="video-card"
           :alt="video.name"
           loading="lazy"
           decoding="async"
@@ -27,7 +28,7 @@ import type { ArtistVideo } from '../domain/artist'
 defineProps<{ videos: readonly ArtistVideo[] }>()
 
 function imageUrl(source: string): string {
-  return coverImageUrl(source, 464, 260)
+  return coverImageUrl(source, 464, 260, { role: 'video-card' })
 }
 
 function coverStyle(source: string): Record<'--cover-image', string> {
