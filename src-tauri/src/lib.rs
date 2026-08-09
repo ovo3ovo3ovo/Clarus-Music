@@ -20,6 +20,7 @@ mod settings;
 mod touch_bar;
 mod track;
 mod unblock;
+mod webkit_memory_cache;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +59,7 @@ pub fn run() {
         .manage(music_api::MusicApiState::default())
         .manage(settings::SettingsState::default())
         .manage(unblock::UnblockMusicState::default())
+        .manage(webkit_memory_cache::WebKitMemoryCacheState::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -241,7 +243,8 @@ pub fn run() {
             playlist::delete_playlist,
             playlist::add_playlist_tracks,
             playlist::remove_playlist_tracks,
-            music_api::cancel_music_request
+            music_api::cancel_music_request,
+            webkit_memory_cache::clear_webkit_memory_cache
         ])
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")
