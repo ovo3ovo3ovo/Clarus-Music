@@ -1,5 +1,5 @@
 <template>
-  <main class="detail-surface-content" data-tauri-drag-region>
+  <main class="detail-surface-content" data-app-scroll-container data-tauri-drag-region>
     <button class="detail-back" type="button" aria-label="Back" @click="emitDetailBack">
       <AppIcon name="arrow-left" />
     </button>

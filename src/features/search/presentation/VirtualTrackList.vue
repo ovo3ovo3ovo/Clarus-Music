@@ -170,9 +170,9 @@ let resizeObserver: ReturnType<typeof createResizeObserver> | null = null
 const TRACK_ROW_HEIGHT = 46
 
 function resolveScrollElement(): DomElement | null {
+  const selector = '[data-app-scroll-container], .app-content'
   return (
-    listRoot.value?.closest<DomElement>('.app-content') ??
-    document.querySelector<DomElement>('.app-content')
+    listRoot.value?.closest<DomElement>(selector) ?? document.querySelector<DomElement>(selector)
   )
 }
 

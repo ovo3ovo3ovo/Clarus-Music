@@ -4,6 +4,7 @@
     <main
       id="app-content"
       class="app-content"
+      data-app-scroll-container
       data-tauri-drag-region
       :class="{ 'has-back-navigation': hasBackNavigation }"
     >
