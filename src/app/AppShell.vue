@@ -38,7 +38,6 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 
 import { RouterView, useRoute } from 'vue-router'
 import AppNavbar from '@/components/layout/AppNavbar.vue'
 import { isPrimaryNavigationRoute } from './primary-navigation'
-import { installRouteMemoryCacheTrimmer } from './route-memory-cache'
 import { router } from './router'
 import { installRouteScrollManager } from './route-scroll'
 import ToastHost from './ToastHost.vue'
@@ -56,7 +55,6 @@ const route = useRoute()
 const appShell = ref<globalThis.HTMLElement | null>(null)
 const hasBackNavigation = computed(() => !isPrimaryNavigationRoute(route.name))
 let removeRouteScrollManager: (() => void) | null = null
-let removeRouteMemoryCacheTrimmer: (() => void) | null = null
 let removeWindowDrag: (() => void) | null = null
 let windowDragDisposed = false
 
@@ -100,7 +98,6 @@ async function installNativeWindowDrag(): Promise<void> {
 
 onMounted(() => {
   removeRouteScrollManager = installRouteScrollManager(router)
-  removeRouteMemoryCacheTrimmer = installRouteMemoryCacheTrimmer(router)
   document.addEventListener('keydown', handlePlaybackKeydown, true)
   void installNativeWindowDrag().catch((error: unknown) => {
     globalThis.console.error('Failed to install window dragging', error)
@@ -114,8 +111,6 @@ onBeforeUnmount(() => {
   removeWindowDrag = null
   removeRouteScrollManager?.()
   removeRouteScrollManager = null
-  removeRouteMemoryCacheTrimmer?.()
-  removeRouteMemoryCacheTrimmer = null
 })
 </script>
 
