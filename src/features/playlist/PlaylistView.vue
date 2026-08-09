@@ -24,23 +24,27 @@
           />
           <span>{{ authStore.session.user?.nickname }}{{ t('library.likedSongsSuffix') }}</span>
         </h1>
-        <div class="liked-search">
-          <IconButton
-            icon="search"
-            :title="t('playlist.search')"
-            :aria-expanded="searchOpen"
-            @click="toggleSearch"
+        <form
+          class="liked-search"
+          role="search"
+          :aria-label="t('playlist.search')"
+          @submit.prevent="activateLikedSearch"
+        >
+          <button class="liked-search__submit" type="submit" :aria-label="t('playlist.search')">
+            <AppIcon name="search" />
+          </button>
+          <input
+            ref="searchInput"
+            v-model="searchDraft"
+            type="search"
+            enterkeyhint="search"
+            autocomplete="off"
+            spellcheck="false"
+            :placeholder="t('playlist.search')"
+            :aria-label="t('playlist.search')"
+            @focus="activateLikedSearch"
           />
-          <label v-if="searchOpen" class="liked-search-input">
-            <input
-              ref="searchInput"
-              v-model="searchDraft"
-              type="search"
-              :placeholder="t('playlist.search')"
-              :aria-label="t('playlist.search')"
-            />
-          </label>
-        </div>
+        </form>
       </header>
 
       <header v-else-if="specialPlaylist" class="special-playlist">
@@ -873,6 +877,14 @@ async function toggleSearch(): Promise<void> {
   void hydrateRemaining()
 }
 
+function activateLikedSearch(): void {
+  if (!searchOpen.value) {
+    searchOpen.value = true
+    void hydrateRemaining()
+  }
+  searchInput.value?.focus()
+}
+
 function closeMenuOnOutsideClick(event: Event): void {
   if (!menuRoot.value?.contains(event.target as ReturnType<typeof document.querySelector>)) {
     menuOpen.value = false
@@ -1000,29 +1012,81 @@ onBeforeUnmount(() => {
 
 .liked-search {
   display: flex;
-  height: 36px;
+  width: min(220px, calc(100vw - 144px));
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex: 0 0 auto;
-}
+  color: var(--color-secondary);
+  background: transparent;
+  transition: color var(--motion-fast) ease;
 
-.liked-search-input {
-  display: flex;
-  width: 172px;
-  height: 34px;
-  padding: 0 10px;
-  align-items: center;
-  border-radius: 8px;
-  background: var(--color-primary-bg-for-transparent);
+  &:hover,
+  &:focus-within {
+    color: var(--color-text);
+  }
 
   input {
     width: 100%;
     min-width: 0;
+    height: 30px;
+    padding: 0 2px;
     border: 0;
-    color: var(--color-text);
-    font-size: 15px;
-    font-weight: 600;
+    outline: 0;
+    color: inherit;
     background: transparent;
+    box-shadow: none;
+    font-size: 12px;
+    font-weight: var(--font-weight-regular);
+    letter-spacing: -0.006em;
+
+    &::placeholder {
+      color: var(--color-text-tertiary);
+      opacity: 1;
+    }
+
+    &:focus-visible {
+      box-shadow: none;
+    }
+  }
+}
+
+.liked-search__submit {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  padding: 3px;
+  border: 0;
+  border-radius: 4px;
+  flex: 0 0 22px;
+  color: currentcolor;
+  background: transparent;
+  place-items: center;
+  transition:
+    color var(--motion-fast) ease,
+    transform var(--motion-hover-emphasis) var(--ease-out);
+  transform-origin: center;
+
+  &:hover {
+    transform: scale(var(--scale-hover-icon));
+  }
+
+  &:focus-visible:not(:hover) {
+    transform: none;
+  }
+
+  &:active {
+    transform: scale(var(--scale-hover-icon));
+  }
+
+  .app-icon {
+    width: 15px;
+    height: 15px;
+    opacity: 0.76;
   }
 }
 
@@ -1560,10 +1624,6 @@ onBeforeUnmount(() => {
     h1 {
       font-size: 28px;
     }
-  }
-
-  .liked-search-input {
-    width: min(172px, calc(100vw - 144px));
   }
 
   .playlist-header {
