@@ -92,36 +92,70 @@ export function installDetailSurfaceNavigation(router: Router): () => void {
   })
 }
 
+export interface DetailSurfaceCoordinator {
+  readonly setOccluded: (occluded: boolean) => void
+  readonly dispose: () => void
+}
+
+const inactiveDetailSurfaceCoordinator: DetailSurfaceCoordinator = {
+  setOccluded: () => undefined,
+  dispose: () => undefined,
+}
+
 export function installDetailSurfaceCoordinator(
   router: Router,
   authSession: () => AuthSession,
-): () => void {
-  if (!desktop.isDesktop || initialDetailSurfaceRoute() !== null) return () => undefined
+): DetailSurfaceCoordinator {
+  if (!desktop.isDesktop || initialDetailSurfaceRoute() !== null) {
+    return inactiveDetailSurfaceCoordinator
+  }
 
   let disposed = false
   let listenersReady = false
+  let occluded = false
   let resizeFrame: number | null = null
   let pendingRoute: RouteLocationNormalizedLoaded | null = router.currentRoute.value
+  let commandTail = Promise.resolve()
   const unlisteners: UnlistenFn[] = []
+
+  const enqueue = (
+    command: string,
+    args?: Record<string, unknown>,
+    onError: (error: unknown) => void = () => undefined,
+  ): void => {
+    commandTail = commandTail.then(async () => {
+      try {
+        await invoke(command, args)
+      } catch (error) {
+        onError(error)
+      }
+    })
+  }
+
+  const dismiss = (): void => enqueue('dismiss_detail_surface')
 
   const present = (route: RouteLocationNormalizedLoaded): void => {
     if (disposed) return
-    if (!routeUsesIsolatedSurface(route)) {
-      void invoke('dismiss_detail_surface').catch(() => undefined)
+    if (occluded || !routeUsesIsolatedSurface(route)) {
+      dismiss()
       return
     }
-    void invoke('present_detail_surface', {
-      route: route.fullPath,
-      bounds: detailBounds(),
-      authSession: authSession(),
-    }).catch((error: unknown) => {
-      globalThis.console.error('Failed to present isolated detail surface', error)
-    })
+    enqueue(
+      'present_detail_surface',
+      {
+        route: route.fullPath,
+        bounds: detailBounds(),
+        authSession: authSession(),
+      },
+      (error: unknown) => {
+        globalThis.console.error('Failed to present isolated detail surface', error)
+      },
+    )
   }
 
   const requestPresent = (route: RouteLocationNormalizedLoaded): void => {
     pendingRoute = route
-    if (!listenersReady) return
+    if (!listenersReady || occluded) return
     pendingRoute = null
     present(route)
   }
@@ -130,7 +164,7 @@ export function installDetailSurfaceCoordinator(
     if (resizeFrame !== null) globalThis.cancelAnimationFrame(resizeFrame)
     resizeFrame = globalThis.requestAnimationFrame(() => {
       resizeFrame = null
-      if (disposed || !routeUsesIsolatedSurface(router.currentRoute.value)) return
+      if (disposed || occluded || !routeUsesIsolatedSurface(router.currentRoute.value)) return
       void invoke('resize_detail_surface', { bounds: detailBounds() }).catch(() => undefined)
     })
   }
@@ -153,12 +187,27 @@ export function installDetailSurfaceCoordinator(
     }
     unlisteners.push(...listeners)
     listenersReady = true
+    if (occluded) return
     const route = pendingRoute
     pendingRoute = null
     if (route !== null) present(route)
   })
 
-  return () => {
+  const setOccluded = (nextOccluded: boolean): void => {
+    if (disposed || occluded === nextOccluded) return
+    occluded = nextOccluded
+    if (occluded) {
+      pendingRoute = router.currentRoute.value
+      dismiss()
+      return
+    }
+    const route = pendingRoute ?? router.currentRoute.value
+    pendingRoute = null
+    if (listenersReady) present(route)
+    else pendingRoute = route
+  }
+
+  const dispose = (): void => {
     if (disposed) return
     disposed = true
     pendingRoute = null
@@ -168,8 +217,10 @@ export function installDetailSurfaceCoordinator(
     globalThis.removeEventListener('resize', resize)
     globalThis.removeEventListener(SIDEBAR_WIDTH_EVENT, resize)
     for (const unlisten of unlisteners) unlisten()
-    void invoke('dismiss_detail_surface').catch(() => undefined)
+    dismiss()
   }
+
+  return { setOccluded, dispose }
 }
 
 export function notifyDetailSurfaceSidebarWidth(): void {

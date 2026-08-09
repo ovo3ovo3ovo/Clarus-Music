@@ -28,7 +28,7 @@
     <PlayerBar />
     <ToastHost />
     <AppDialogHost />
-    <Transition name="lyrics-slide">
+    <Transition name="lyrics-slide" @after-leave="handleLyricsAfterLeave">
       <div v-if="lyricsStore.visible" class="lyrics-overlay-shell">
         <LyricsOverlay />
       </div>
@@ -37,13 +37,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterView, useRoute } from 'vue-router'
 import AppNavbar from '@/components/layout/AppNavbar.vue'
 import { isPrimaryNavigationRoute } from './primary-navigation'
 import { router } from './router'
 import { installRouteScrollManager } from './route-scroll'
-import { installDetailSurfaceCoordinator } from '@/platform/detail-surface'
+import {
+  installDetailSurfaceCoordinator,
+  type DetailSurfaceCoordinator,
+} from '@/platform/detail-surface'
 import ToastHost from './ToastHost.vue'
 import AppDialogHost from '@/components/common/AppDialogHost.vue'
 import PlayerBar from '@/features/player/presentation/PlayerBar.vue'
@@ -61,7 +64,7 @@ const route = useRoute()
 const appShell = ref<globalThis.HTMLElement | null>(null)
 const hasBackNavigation = computed(() => !isPrimaryNavigationRoute(route.name))
 let removeRouteScrollManager: (() => void) | null = null
-let removeDetailSurfaceCoordinator: (() => void) | null = null
+let detailSurfaceCoordinator: DetailSurfaceCoordinator | null = null
 let removeWindowDrag: (() => void) | null = null
 let windowDragDisposed = false
 
@@ -103,9 +106,22 @@ async function installNativeWindowDrag(): Promise<void> {
   })
 }
 
+function handleLyricsAfterLeave(): void {
+  if (!lyricsStore.visible) detailSurfaceCoordinator?.setOccluded(false)
+}
+
+watch(
+  () => lyricsStore.visible,
+  (visible) => {
+    if (visible) detailSurfaceCoordinator?.setOccluded(true)
+  },
+  { flush: 'sync' },
+)
+
 onMounted(() => {
   removeRouteScrollManager = installRouteScrollManager(router)
-  removeDetailSurfaceCoordinator = installDetailSurfaceCoordinator(router, () => authStore.session)
+  detailSurfaceCoordinator = installDetailSurfaceCoordinator(router, () => authStore.session)
+  detailSurfaceCoordinator.setOccluded(lyricsStore.visible)
   document.addEventListener('keydown', handlePlaybackKeydown, true)
   void installNativeWindowDrag().catch((error: unknown) => {
     globalThis.console.error('Failed to install window dragging', error)
@@ -119,8 +135,8 @@ onBeforeUnmount(() => {
   removeWindowDrag = null
   removeRouteScrollManager?.()
   removeRouteScrollManager = null
-  removeDetailSurfaceCoordinator?.()
-  removeDetailSurfaceCoordinator = null
+  detailSurfaceCoordinator?.dispose()
+  detailSurfaceCoordinator = null
 })
 </script>
 
