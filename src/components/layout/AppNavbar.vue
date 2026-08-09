@@ -113,6 +113,7 @@ import AppIcon from '@/components/common/AppIcon.vue'
 import CoverImage from '@/components/common/CoverImage.vue'
 import { useAuthStore } from '@/features/auth/application/auth-store'
 import { isPrimaryNavigationRoute } from '@/app/primary-navigation'
+import { notifyDetailSurfaceSidebarWidth } from '@/platform/detail-surface'
 
 const router = useRouter()
 const route = useRoute()
@@ -168,6 +169,7 @@ function applySidebarWidth(width: number): void {
   const nextWidth = Math.min(maxSidebarWidth.value, Math.max(SIDEBAR_MIN_WIDTH, width))
   sidebarWidth.value = nextWidth
   document.documentElement.style.setProperty('--sidebar-width', `${nextWidth}px`)
+  notifyDetailSurfaceSidebarWidth()
 }
 
 function saveSidebarWidth(): void {

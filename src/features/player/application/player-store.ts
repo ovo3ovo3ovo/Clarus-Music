@@ -4,6 +4,11 @@ import { NativeCatalogGateway } from '@/features/catalog/infrastructure/native-c
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import type { MusicQuality } from '@/features/settings/domain/settings'
 import { preloadCoverImages } from '@/platform/cover-image'
+import {
+  appendMainDetailQueue,
+  isDetailPlaybackClient,
+  requestMainDetailPlayback,
+} from '@/platform/detail-playback'
 import type { RepeatMode, Track } from '@/types/music'
 import {
   releaseAudioSource,
@@ -292,6 +297,20 @@ export function createPlayerStore(
       autoplay = true,
       signal?: AbortSignal,
     ): Promise<void> {
+      if (isDetailPlaybackClient()) {
+        releaseAudioSource(source)
+        await requestMainDetailPlayback({
+          queue: queue.value,
+          index: currentIndex.value,
+          source: queueSource.value,
+          track,
+          autoplay,
+        })
+        currentTrack.value = track
+        progress.value = 0
+        state.value = autoplay ? 'playing' : 'ready'
+        return
+      }
       activeLoad.value?.abort('Track changed')
       const controller = new AbortController()
       activeLoad.value = controller
@@ -377,6 +396,7 @@ export function createPlayerStore(
 
     function appendQueue(tracks: readonly Track[], expectedSource: string): boolean {
       if (queueSource.value !== expectedSource) return false
+      if (isDetailPlaybackClient()) appendMainDetailQueue(tracks, expectedSource)
       const previousLength = queue.value.length
       const ids = new Set(queue.value.map(({ id }) => id))
       const additions = tracks.filter((track) => {

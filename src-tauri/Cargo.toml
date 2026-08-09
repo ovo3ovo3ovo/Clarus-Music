@@ -36,7 +36,7 @@ unm_engine_kugou = "0.4.0"
 unm_engine_ytdl = "0.4.0"
 unm_request = "0.4.0"
 unm_types = "0.4.0"
-tauri = { version = "2.11.3", features = ["protocol-asset"] }
+tauri = { version = "2.11.3", features = ["protocol-asset", "unstable"] }
 tauri-plugin-log = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "sync", "time"] }
 zeroize = "1.8"

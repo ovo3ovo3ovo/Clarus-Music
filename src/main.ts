@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import { invoke } from '@tauri-apps/api/core'
 import App from './App.vue'
+import DetailSurfaceApp from './DetailSurfaceApp.vue'
 import { i18n } from '@/app/i18n'
 import { preloadPrimaryViews, router } from '@/app/router'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
@@ -12,18 +13,38 @@ import { installDesktopControls } from '@/platform/desktop-controls'
 import { executeWindowCloseAction, resolveWindowCloseAction } from '@/platform/window-close'
 import { installNativeTooltipBlocker } from '@/platform/native-tooltips'
 import { showAppAlert, showAppConfirm } from '@/platform/app-dialogs'
+import {
+  initialDetailSurfaceRoute,
+  initialDetailAuthSession,
+  installDetailSurfaceNavigation,
+} from '@/platform/detail-surface'
+import { installMainDetailPlayback } from '@/platform/detail-playback-host'
 import '@/styles/global.scss'
 
 installNativeTooltipBlocker(document.documentElement)
 
 const pinia = createPinia()
-const app = createApp(App).use(pinia).use(router).use(i18n)
+const detailSurfaceRoute = initialDetailSurfaceRoute()
+const detailAuthSession = initialDetailAuthSession()
+const app = createApp(detailSurfaceRoute === null ? App : DetailSurfaceApp)
+  .use(pinia)
+  .use(router)
+  .use(i18n)
 
 const settingsStore = useSettingsStore(pinia)
 await settingsStore.initialize()
+if (detailSurfaceRoute !== null) await router.replace(detailSurfaceRoute)
 await router.isReady()
-void useAuthStore(pinia).restore()
+const authStore = useAuthStore(pinia)
+if (detailSurfaceRoute !== null && detailAuthSession !== null) authStore.session = detailAuthSession
+else void authStore.restore()
+if (desktop.isDesktop && detailSurfaceRoute === null) {
+  await installMainDetailPlayback(pinia).catch((error: unknown) => {
+    console.error('Failed to install detail playback bridge', error)
+  })
+}
 app.mount('#app')
+if (detailSurfaceRoute !== null) installDetailSurfaceNavigation(router)
 
 function preloadPrimaryViewsWhenIdle(): void {
   const preload = () => preloadPrimaryViews()
@@ -34,7 +55,7 @@ function preloadPrimaryViewsWhenIdle(): void {
   globalThis.setTimeout(preload, 180)
 }
 
-preloadPrimaryViewsWhenIdle()
+if (detailSurfaceRoute === null) preloadPrimaryViewsWhenIdle()
 
 async function installDesktopControlBridge(): Promise<void> {
   const player = usePlayerStore(pinia)
@@ -115,7 +136,7 @@ async function installSettingsCloseFlush(): Promise<void> {
   })
 }
 
-if (desktop.isDesktop) {
+if (desktop.isDesktop && detailSurfaceRoute === null) {
   void installDesktopControlBridge().catch((error: unknown) => {
     console.error('Failed to install desktop controls', error)
   })

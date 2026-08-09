@@ -9,6 +9,7 @@ mod audio_cache;
 mod auth;
 mod catalog;
 mod daily;
+mod detail_surface;
 mod external;
 mod library;
 mod lyrics;
@@ -55,6 +56,7 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
     builder
         .manage(audio_cache::AudioCacheState::default())
+        .manage(detail_surface::DetailSurfaceState::default())
         .manage(music_api::MusicApiState::default())
         .manage(settings::SettingsState::default())
         .manage(unblock::UnblockMusicState::default())
@@ -241,7 +243,10 @@ pub fn run() {
             playlist::delete_playlist,
             playlist::add_playlist_tracks,
             playlist::remove_playlist_tracks,
-            music_api::cancel_music_request
+            music_api::cancel_music_request,
+            detail_surface::present_detail_surface,
+            detail_surface::resize_detail_surface,
+            detail_surface::dismiss_detail_surface
         ])
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")

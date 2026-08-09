@@ -17,7 +17,9 @@
         </KeepAlive>
         <component
           :is="Component"
-          v-if="!viewRoute.meta.keepAlive"
+          v-if="
+            !viewRoute.meta.keepAlive && (!viewRoute.meta.isolatedSurface || !desktop.isDesktop)
+          "
           :key="viewRoute.name === 'artist' ? 'artist' : viewRoute.fullPath"
         />
       </RouterView>
@@ -40,21 +42,25 @@ import AppNavbar from '@/components/layout/AppNavbar.vue'
 import { isPrimaryNavigationRoute } from './primary-navigation'
 import { router } from './router'
 import { installRouteScrollManager } from './route-scroll'
+import { installDetailSurfaceCoordinator } from '@/platform/detail-surface'
 import ToastHost from './ToastHost.vue'
 import AppDialogHost from '@/components/common/AppDialogHost.vue'
 import PlayerBar from '@/features/player/presentation/PlayerBar.vue'
 import { useLyricsStore } from '@/features/lyrics/application/lyrics-store'
 import { usePlayerStore } from '@/features/player/application/player-store'
+import { useAuthStore } from '@/features/auth/application/auth-store'
 import { desktop } from '@/platform/desktop'
 import { installWindowDrag } from '@/platform/window-drag'
 
 const LyricsOverlay = defineAsyncComponent(() => import('@/features/lyrics/LyricsOverlay.vue'))
 const lyricsStore = useLyricsStore()
 const player = usePlayerStore()
+const authStore = useAuthStore()
 const route = useRoute()
 const appShell = ref<globalThis.HTMLElement | null>(null)
 const hasBackNavigation = computed(() => !isPrimaryNavigationRoute(route.name))
 let removeRouteScrollManager: (() => void) | null = null
+let removeDetailSurfaceCoordinator: (() => void) | null = null
 let removeWindowDrag: (() => void) | null = null
 let windowDragDisposed = false
 
@@ -98,6 +104,7 @@ async function installNativeWindowDrag(): Promise<void> {
 
 onMounted(() => {
   removeRouteScrollManager = installRouteScrollManager(router)
+  removeDetailSurfaceCoordinator = installDetailSurfaceCoordinator(router, () => authStore.session)
   document.addEventListener('keydown', handlePlaybackKeydown, true)
   void installNativeWindowDrag().catch((error: unknown) => {
     globalThis.console.error('Failed to install window dragging', error)
@@ -111,6 +118,8 @@ onBeforeUnmount(() => {
   removeWindowDrag = null
   removeRouteScrollManager?.()
   removeRouteScrollManager = null
+  removeDetailSurfaceCoordinator?.()
+  removeDetailSurfaceCoordinator = null
 })
 </script>
 

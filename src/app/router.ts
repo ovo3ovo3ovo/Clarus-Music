@@ -51,6 +51,7 @@ const routes: readonly RouteRecordRaw[] = [
     path: '/playlist/:id',
     name: 'playlist',
     component: () => import('@/features/playlist/PlaylistView.vue'),
+    meta: { isolatedSurface: true },
     beforeEnter: (to) =>
       parsePositiveIntegerRouteParam(to.params.id) ? true : { path: '/library', replace: true },
   },
@@ -58,6 +59,7 @@ const routes: readonly RouteRecordRaw[] = [
     path: '/album/:id',
     name: 'album',
     component: () => import('@/features/album/AlbumView.vue'),
+    meta: { isolatedSurface: true },
     beforeEnter: (to) =>
       parsePositiveIntegerRouteParam(to.params.id) ? true : { path: '/library', replace: true },
   },
@@ -65,6 +67,7 @@ const routes: readonly RouteRecordRaw[] = [
     path: '/artist/:id',
     name: 'artist',
     component: () => import('@/features/artist/ArtistView.vue'),
+    meta: { isolatedSurface: true },
     beforeEnter: (to) =>
       parsePositiveIntegerRouteParam(to.params.id) ? true : { path: '/library', replace: true },
   },
@@ -72,6 +75,7 @@ const routes: readonly RouteRecordRaw[] = [
     path: '/artist/:id/mv',
     name: 'artistMV',
     component: () => import('@/features/artist/ArtistMvView.vue'),
+    meta: { isolatedSurface: true },
     beforeEnter: (to) =>
       parsePositiveIntegerRouteParam(to.params.id) ? true : { path: '/library', replace: true },
   },
@@ -79,6 +83,7 @@ const routes: readonly RouteRecordRaw[] = [
     path: '/mv/:id',
     name: 'mv',
     component: () => import('@/features/music-video/MusicVideoView.vue'),
+    meta: { isolatedSurface: true },
     beforeEnter: (to) =>
       parsePositiveIntegerRouteParam(to.params.id) ? true : { path: '/library', replace: true },
   },
