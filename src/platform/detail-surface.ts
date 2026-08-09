@@ -7,6 +7,7 @@ import { desktop } from './desktop'
 declare global {
   interface Window {
     __CLARUS_SURFACE__?: 'detail'
+    __CLARUS_DETAIL_LABEL__?: string
     __CLARUS_DETAIL_ROUTE__?: string
     __CLARUS_AUTH_SESSION__?: unknown
   }
@@ -31,6 +32,12 @@ export function initialDetailSurfaceRoute(): string | null {
   if (window.__CLARUS_SURFACE__ !== 'detail') return null
   const route = window.__CLARUS_DETAIL_ROUTE__
   return typeof route === 'string' && route.startsWith('/') ? route : null
+}
+
+function initialDetailSurfaceLabel(): string | null {
+  if (window.__CLARUS_SURFACE__ !== 'detail') return null
+  const label = window.__CLARUS_DETAIL_LABEL__
+  return typeof label === 'string' && /^clarus-detail-\d{1,20}$/.test(label) ? label : null
 }
 
 export function initialDetailAuthSession(): AuthSession | null {
@@ -81,6 +88,22 @@ export async function emitDetailBack(): Promise<void> {
   await emitTo('main', DETAIL_BACK_EVENT)
 }
 
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => globalThis.requestAnimationFrame(() => resolve()))
+}
+
+export async function notifyDetailSurfaceReady(): Promise<boolean> {
+  if (!desktop.isDesktop) return false
+  const label = initialDetailSurfaceLabel()
+  if (label === null) return false
+  // Vue's mounted hook runs before its pixels are guaranteed to be committed.
+  // Two compositor turns keep the old native surface visible until the new
+  // route has produced a real frame instead of WebKit's blank backing layer.
+  await nextAnimationFrame()
+  await nextAnimationFrame()
+  return invoke<boolean>('detail_surface_ready', { label })
+}
+
 export function installDetailSurfaceNavigation(router: Router): () => void {
   if (!desktop.isDesktop) return () => undefined
   return router.beforeEach((to, from) => {
@@ -113,6 +136,7 @@ export function installDetailSurfaceCoordinator(
   let disposed = false
   let listenersReady = false
   let occluded = false
+  let occludedRoute: string | null = null
   let resizeFrame: number | null = null
   let pendingRoute: RouteLocationNormalizedLoaded | null = router.currentRoute.value
   let commandTail = Promise.resolve()
@@ -122,10 +146,11 @@ export function installDetailSurfaceCoordinator(
     command: string,
     args?: Record<string, unknown>,
     onError: (error: unknown) => void = () => undefined,
+    onSuccess: (result: unknown) => void = () => undefined,
   ): void => {
     commandTail = commandTail.then(async () => {
       try {
-        await invoke(command, args)
+        onSuccess(await invoke(command, args))
       } catch (error) {
         onError(error)
       }
@@ -144,6 +169,7 @@ export function installDetailSurfaceCoordinator(
       'present_detail_surface',
       {
         route: route.fullPath,
+        theme: document.documentElement.dataset.theme === 'oled' ? 'oled' : 'light',
         bounds: detailBounds(),
         authSession: authSession(),
       },
@@ -155,7 +181,14 @@ export function installDetailSurfaceCoordinator(
 
   const requestPresent = (route: RouteLocationNormalizedLoaded): void => {
     pendingRoute = route
-    if (!listenersReady || occluded) return
+    if (!listenersReady) return
+    if (occluded) {
+      if (occludedRoute !== null && route.fullPath !== occludedRoute) {
+        occludedRoute = null
+        dismiss()
+      }
+      return
+    }
     pendingRoute = null
     present(route)
   }
@@ -197,20 +230,40 @@ export function installDetailSurfaceCoordinator(
     if (disposed || occluded === nextOccluded) return
     occluded = nextOccluded
     if (occluded) {
+      occludedRoute = routeUsesIsolatedSurface(router.currentRoute.value)
+        ? router.currentRoute.value.fullPath
+        : null
       pendingRoute = router.currentRoute.value
-      dismiss()
+      enqueue('hide_detail_surface')
       return
     }
     const route = pendingRoute ?? router.currentRoute.value
     pendingRoute = null
-    if (listenersReady) present(route)
-    else pendingRoute = route
+    const canRestore = occludedRoute !== null && route.fullPath === occludedRoute
+    occludedRoute = null
+    if (!listenersReady) {
+      pendingRoute = route
+      return
+    }
+    if (!canRestore || !routeUsesIsolatedSurface(route)) {
+      present(route)
+      return
+    }
+    enqueue(
+      'show_detail_surface',
+      { bounds: detailBounds() },
+      () => present(route),
+      (restored) => {
+        if (restored !== true) present(route)
+      },
+    )
   }
 
   const dispose = (): void => {
     if (disposed) return
     disposed = true
     pendingRoute = null
+    occludedRoute = null
     if (resizeFrame !== null) globalThis.cancelAnimationFrame(resizeFrame)
     resizeFrame = null
     removeAfter()

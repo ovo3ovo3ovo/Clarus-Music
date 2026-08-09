@@ -9,7 +9,7 @@
       :class="{ 'has-back-navigation': hasBackNavigation }"
     >
       <RouterView v-slot="{ Component, route: viewRoute }">
-        <KeepAlive :max="10">
+        <KeepAlive :max="3">
           <component
             :is="Component"
             v-if="viewRoute.meta.keepAlive"

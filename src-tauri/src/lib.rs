@@ -245,7 +245,10 @@ pub fn run() {
             playlist::remove_playlist_tracks,
             music_api::cancel_music_request,
             detail_surface::present_detail_surface,
+            detail_surface::detail_surface_ready,
             detail_surface::resize_detail_surface,
+            detail_surface::hide_detail_surface,
+            detail_surface::show_detail_surface,
             detail_surface::dismiss_detail_surface
         ])
         .build(tauri::generate_context!())

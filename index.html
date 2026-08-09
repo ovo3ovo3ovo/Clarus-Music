@@ -4,6 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Clarus Music</title>
+    <style>
+      html,
+      body,
+      #app {
+        min-height: 100%;
+        margin: 0;
+        color-scheme: light;
+        background: #fff;
+      }
+
+      html[data-theme='oled'],
+      html[data-theme='oled'] body,
+      html[data-theme='oled'] #app {
+        color-scheme: dark;
+        background: #000;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

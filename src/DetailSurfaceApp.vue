@@ -10,9 +10,16 @@
 </template>
 
 <script setup lang="ts">
+import { onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 import AppIcon from '@/components/common/AppIcon.vue'
-import { emitDetailBack } from '@/platform/detail-surface'
+import { emitDetailBack, notifyDetailSurfaceReady } from '@/platform/detail-surface'
+
+onMounted(() => {
+  void notifyDetailSurfaceReady().catch((error: unknown) => {
+    globalThis.console.error('Failed to mark the detail surface ready', error)
+  })
+})
 </script>
 
 <style scoped lang="scss">
