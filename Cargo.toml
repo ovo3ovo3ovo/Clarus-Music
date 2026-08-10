@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/clarus-core", "apps/clarus-tui"]
+exclude = ["src-tauri"]
+resolver = "2"

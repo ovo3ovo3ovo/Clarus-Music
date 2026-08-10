@@ -13,6 +13,7 @@ dist-ssr
 .cache
 coverage
 src-tauri/target
+/target
 *.dmg
 *.local
 /artifacts/perf/
