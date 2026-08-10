@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use app::{App, Message};
 use clarus_core::MusicCore;
 use crossterm::{
@@ -44,11 +44,18 @@ fn main() -> Result<()> {
     {
         return benchmark::run(&arguments[1..]);
     }
+    let start_with_qr = match arguments.as_slice() {
+        [] => false,
+        [argument] if argument == "--qr-login" => true,
+        _ => bail!(
+            "用法：clarus-tui [--qr-login]\n      clarus-tui --benchmark-audio <本地音频文件> [秒数]"
+        ),
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let result = runtime.block_on(async_main());
+    let result = runtime.block_on(async_main(start_with_qr));
     // Keychain is necessarily accessed through a blocking OS API. Never let a
     // stuck credential prompt prevent terminal restoration or a user-requested
     // exit; live requests are aborted by App::drop before this deadline.
@@ -56,7 +63,7 @@ fn main() -> Result<()> {
     result
 }
 
-async fn async_main() -> Result<()> {
+async fn async_main(start_with_qr: bool) -> Result<()> {
     if !io::stdout().is_terminal()
         || !io::stdin().is_terminal()
         || std::env::var("TERM").ok().as_deref() == Some("dumb")
@@ -73,7 +80,7 @@ async fn async_main() -> Result<()> {
             return Err(error);
         }
     };
-    let result = run(&mut terminal, capabilities).await;
+    let result = run(&mut terminal, capabilities, start_with_qr).await;
     leave_terminal();
     result
 }
@@ -119,8 +126,8 @@ fn leave_terminal() {
     let mut stdout = io::stdout();
     let _ = execute!(
         stdout,
-        LeaveAlternateScreen,
         Print(DISABLE_TUI_MOUSE),
+        LeaveAlternateScreen,
         ResetColor,
         crossterm::cursor::Show
     );
@@ -138,10 +145,15 @@ fn install_panic_restore_hook() {
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     capabilities: ui::Capabilities,
+    start_with_qr: bool,
 ) -> Result<()> {
     let core = Arc::new(MusicCore::new());
     let (tx, mut messages) = mpsc::channel::<Message>(64);
-    let mut app = App::new(core, tx);
+    let mut app = if start_with_qr {
+        App::new_for_qr_login(core, tx)
+    } else {
+        App::new(core, tx)
+    };
     let mut events = EventStream::new();
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
     let mut terminate = Box::pin(termination_signal());

@@ -423,6 +423,17 @@ impl App {
         app
     }
 
+    /// Starts the login flow with a terminal QR code without reading the
+    /// system Keychain at startup. The normal constructor intentionally
+    /// restores the saved session first; this explicit path is useful when a
+    /// listener wants to avoid a pending macOS credential sheet and
+    /// authenticate afresh.
+    pub fn new_for_qr_login(core: Arc<MusicCore>, tx: mpsc::Sender<Message>) -> Self {
+        let mut app = Self::initial(core, tx);
+        app.begin_qr();
+        app
+    }
+
     fn initial(core: Arc<MusicCore>, tx: mpsc::Sender<Message>) -> Self {
         Self {
             core,
