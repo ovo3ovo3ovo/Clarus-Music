@@ -418,13 +418,7 @@ pub fn qr_status(code: i64) -> (QrLoginStatus, &'static str) {
 }
 
 pub fn authenticated_cookie(response: &ApiResponse) -> Result<String, CoreError> {
-    let mut cookies = BTreeMap::new();
-    if let Some(cookie) = response.body.get("cookie").and_then(Value::as_str) {
-        insert_cookie_pairs(&mut cookies, cookie);
-    }
-    for cookie in &response.cookie {
-        insert_cookie_pairs(&mut cookies, cookie);
-    }
+    let cookies = response_cookie_pairs(response);
     if !cookies.contains_key("MUSIC_U") {
         return Err(CoreError::SecureStorage(
             "The login response did not contain an authenticated session".to_string(),
@@ -435,6 +429,25 @@ pub fn authenticated_cookie(response: &ApiResponse) -> Result<String, CoreError>
         .map(|(name, value)| format!("{name}={value}"))
         .collect::<Vec<_>>()
         .join("; "))
+}
+
+/// Returns one value from cookies returned by an API endpoint. This is used
+/// for the unauthenticated `MUSIC_A` device token as well as authenticated
+/// sessions, so it accepts both a response body cookie string and HTTP
+/// `Set-Cookie` headers.
+pub fn response_cookie_value(response: &ApiResponse, name: &str) -> Option<String> {
+    response_cookie_pairs(response).remove(name)
+}
+
+fn response_cookie_pairs(response: &ApiResponse) -> BTreeMap<String, String> {
+    let mut cookies = BTreeMap::new();
+    if let Some(cookie) = response.body.get("cookie").and_then(Value::as_str) {
+        insert_cookie_pairs(&mut cookies, cookie);
+    }
+    for cookie in &response.cookie {
+        insert_cookie_pairs(&mut cookies, cookie);
+    }
+    cookies
 }
 
 fn insert_cookie_pairs(cookies: &mut BTreeMap<String, String>, source: &str) {
@@ -628,8 +641,9 @@ mod tests {
 
     use super::{
         parse_daily_songs_response, parse_lrc, parse_lyrics_response,
-        parse_playlist_detail_response, parse_playlist_page_response,
+        parse_playlist_detail_response, parse_playlist_page_response, qr_login_key, qr_status,
     };
+    use crate::QrLoginStatus;
 
     fn track(id: i64) -> serde_json::Value {
         json!({
@@ -664,6 +678,23 @@ mod tests {
         let daily = parse_daily_songs_response(response).unwrap();
         assert_eq!(daily.tracks.len(), 1);
         assert_eq!(daily.tracks[0].id, 10);
+    }
+
+    #[test]
+    fn parses_qr_login_keys_and_all_poll_statuses() {
+        assert_eq!(
+            qr_login_key(&json!({ "data": { "unikey": "nested-key" } })),
+            Some("nested-key")
+        );
+        assert_eq!(
+            qr_login_key(&json!({ "unikey": "root-key" })),
+            Some("root-key")
+        );
+        assert_eq!(qr_login_key(&json!({ "data": { "unikey": "" } })), None);
+        assert_eq!(qr_status(800).0, QrLoginStatus::Expired);
+        assert_eq!(qr_status(802).0, QrLoginStatus::Scanned);
+        assert_eq!(qr_status(803).0, QrLoginStatus::Authorized);
+        assert_eq!(qr_status(801).0, QrLoginStatus::Waiting);
     }
 
     #[test]

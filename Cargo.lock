@@ -424,9 +424,12 @@ dependencies = [
 name = "clarus-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "fs2",
  "keyring",
+ "md-5",
  "ncm-api-rs",
+ "rand 0.8.7",
  "reqwest",
  "serde",
  "serde_json",
@@ -434,6 +437,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "url",
+ "urlencoding",
  "zeroize",
 ]
 
@@ -445,6 +449,7 @@ dependencies = [
  "clarus-core",
  "crossterm",
  "futures-util",
+ "libc",
  "qrcode",
  "ratatui",
  "rodio",

@@ -6,10 +6,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { URL } from 'node:url'
+import { inflateSync } from 'node:zlib'
 
 import { CANONICAL_FIXTURE_ROOT, LOCK_FILENAME } from './fixture-spec.mjs'
 import { generateFixtures } from './fixture-generator.mjs'
-import { createFixtureRangeServer } from './range-server.mjs'
+import {
+  PERFORMANCE_IMAGE_MAX_CACHE_BYTES,
+  PERFORMANCE_IMAGE_MAX_DIMENSION,
+  createFixtureRangeServer,
+} from './range-server.mjs'
 
 const temporaryDirectories = []
 let realSetPromise
@@ -65,6 +70,44 @@ function requestFixture(baseUrl, { headers = {}, method = 'GET', path = '/' } = 
     clientRequest.on('error', reject)
     clientRequest.end()
   })
+}
+
+function pngDimensions(body) {
+  assert.deepEqual(body.subarray(0, 8), Buffer.from('89504e470d0a1a0a', 'hex'))
+  let offset = 8
+  let width
+  let height
+  const idat = []
+  while (offset < body.byteLength) {
+    const length = body.readUInt32BE(offset)
+    const type = body.subarray(offset + 4, offset + 8).toString('ascii')
+    const dataStart = offset + 8
+    const dataEnd = dataStart + length
+    assert.ok(dataEnd + 4 <= body.byteLength, `PNG ${type} chunk is truncated`)
+    const data = body.subarray(dataStart, dataEnd)
+    if (type === 'IHDR') {
+      assert.equal(length, 13)
+      width = data.readUInt32BE(0)
+      height = data.readUInt32BE(4)
+      assert.equal(data[8], 8)
+      assert.equal(data[9], 6)
+    } else if (type === 'IDAT') {
+      idat.push(data)
+    } else if (type === 'IEND') {
+      assert.equal(length, 0)
+      assert.equal(dataEnd + 4, body.byteLength)
+      break
+    }
+    offset = dataEnd + 4
+  }
+  assert.ok(Number.isSafeInteger(width) && width > 0)
+  assert.ok(Number.isSafeInteger(height) && height > 0)
+  const decoded = inflateSync(Buffer.concat(idat))
+  assert.equal(decoded.byteLength, (width * 4 + 1) * height)
+  for (let row = 0; row < height; row += 1) {
+    assert.equal(decoded[row * (width * 4 + 1)], 0)
+  }
+  return { height, width }
 }
 
 async function firstMp3(directory) {
@@ -170,6 +213,12 @@ test('the range server preserves the full GET/HEAD and single-range contract', a
       path: `/${target.filename}`,
     })
     assert.equal(method.statusCode, 405)
+    const metrics = fixtureServer.metrics.snapshot()
+    assert.equal(metrics.activeRequests, 0)
+    assert.ok(metrics.totalRequests >= 10)
+    assert.ok(metrics.failedRequests >= 4)
+    assert.ok(metrics.rangeRequests >= 4)
+    assert.ok(metrics.bytesSent >= source.byteLength)
   } finally {
     await fixtureServer.close()
   }
@@ -177,6 +226,113 @@ test('the range server preserves the full GET/HEAD and single-range contract', a
   assert.equal(fixtureServer.server.listening, false)
   await assert.rejects(() => requestFixture(fixtureServer.baseUrl, { path: `/${target.filename}` }))
   await fixtureServer.close()
+})
+
+test('performance image fixtures use the requested dimensions and a canonical bounded cache key', async () => {
+  const directory = await realSetDirectory()
+  const fixtureServer = await createFixtureRangeServer({ directory })
+  const pathname = '/clarus-perf/album/42/0.png'
+  try {
+    const first = await requestFixture(fixtureServer.baseUrl, {
+      path: `${pathname}?param=64y32`,
+    })
+    assert.equal(first.statusCode, 200)
+    assert.equal(first.headers['content-type'], 'image/png')
+    assert.equal(first.headers['cache-control'], 'public, max-age=31536000, immutable')
+    assert.equal(first.headers['content-length'], String(first.body.byteLength))
+    assert.deepEqual(pngDimensions(first.body), { height: 32, width: 64 })
+
+    const xAlias = await requestFixture(fixtureServer.baseUrl, {
+      path: `${pathname}?param=64x32`,
+    })
+    assert.equal(xAlias.statusCode, 200)
+    assert.deepEqual(xAlias.body, first.body)
+
+    const retry = await requestFixture(fixtureServer.baseUrl, {
+      path: `${pathname}?param=64y32&clarus_retry=1`,
+    })
+    assert.equal(retry.statusCode, 200)
+    assert.deepEqual(retry.body, first.body)
+
+    const differentlySized = await requestFixture(fixtureServer.baseUrl, {
+      path: `${pathname}?param=32y64`,
+    })
+    assert.equal(differentlySized.statusCode, 200)
+    assert.deepEqual(pngDimensions(differentlySized.body), { height: 64, width: 32 })
+    assert.notDeepEqual(differentlySized.body, first.body)
+
+    const differentArtwork = await requestFixture(fixtureServer.baseUrl, {
+      path: '/clarus-perf/album/42/1.png?param=64y32',
+    })
+    assert.equal(differentArtwork.statusCode, 200)
+    assert.notDeepEqual(differentArtwork.body, first.body)
+
+    const metrics = fixtureServer.metrics.snapshot()
+    const firstKey = `${pathname}?param=64x32`
+    assert.deepEqual(metrics.byFilename[firstKey], {
+      bytesSent: first.body.byteLength * 3,
+      failures: 0,
+      requests: 3,
+    })
+    assert.deepEqual(metrics.byCacheKey[firstKey], metrics.byFilename[firstKey])
+    assert.equal(metrics.byCacheKey[`${pathname}?param=32x64`]?.requests, 1)
+    assert.equal(metrics.byCacheKey['/clarus-perf/album/42/1.png?param=64x32']?.requests, 1)
+    assert.equal(metrics.performanceImageCache?.entries, 3)
+    assert.equal(metrics.performanceImageCache?.hits, 2)
+    assert.equal(metrics.performanceImageCache?.misses, 3)
+    assert.ok(
+      (metrics.performanceImageCache?.bytes ?? Infinity) <= PERFORMANCE_IMAGE_MAX_CACHE_BYTES,
+    )
+  } finally {
+    await fixtureServer.close()
+  }
+})
+
+test('performance image fixtures reject missing, malformed, and over-limit dimensions before generation', async () => {
+  const directory = await realSetDirectory()
+  const fixtureServer = await createFixtureRangeServer({ directory })
+  const pathname = '/clarus-perf/cover.png'
+  const invalidPaths = [
+    pathname,
+    `${pathname}?param=`,
+    `${pathname}?param=0y1`,
+    `${pathname}?param=1y0`,
+    `${pathname}?param=-1y1`,
+    `${pathname}?param=1.5y1`,
+    `${pathname}?param=1z1`,
+    `${pathname}?param=1y1&param=2y2`,
+    `${pathname}?param=${PERFORMANCE_IMAGE_MAX_DIMENSION + 1}y1`,
+    `${pathname}?param=1y${PERFORMANCE_IMAGE_MAX_DIMENSION + 1}`,
+    // Both axes meet the dimension cap, but the conservative aggregate
+    // allocation estimate exceeds the generation-memory cap.
+    `${pathname}?param=${PERFORMANCE_IMAGE_MAX_DIMENSION}y${PERFORMANCE_IMAGE_MAX_DIMENSION}`,
+  ]
+  try {
+    for (const path of invalidPaths) {
+      const response = await requestFixture(fixtureServer.baseUrl, { path })
+      assert.equal(response.statusCode, 400, path)
+      assert.equal(response.headers['cache-control'], 'no-store', path)
+      assert.equal(response.headers['content-length'], '0', path)
+      assert.equal(response.body.byteLength, 0, path)
+    }
+
+    const atDimensionLimit = await requestFixture(fixtureServer.baseUrl, {
+      path: `${pathname}?param=${PERFORMANCE_IMAGE_MAX_DIMENSION}y1`,
+    })
+    assert.equal(atDimensionLimit.statusCode, 200)
+    assert.deepEqual(pngDimensions(atDimensionLimit.body), {
+      height: 1,
+      width: PERFORMANCE_IMAGE_MAX_DIMENSION,
+    })
+
+    const metrics = fixtureServer.metrics.snapshot()
+    assert.equal(metrics.failedRequests, invalidPaths.length)
+    assert.equal(metrics.performanceImageCache?.entries, 1)
+    assert.equal(metrics.performanceImageCache?.hits, 0)
+    assert.equal(metrics.performanceImageCache?.misses, 1)
+  } finally {
+    await fixtureServer.close()
+  }
 })
 
 test('verified no-follow handles keep serving the original bytes after a pathname becomes a symlink', async () => {

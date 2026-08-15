@@ -7,10 +7,11 @@ use tauri::State;
 
 use crate::{
     catalog::{
-        array, normalized_image_url, parse_track_with_privilege, value_i64, value_string,
-        value_u64, CatalogItem,
+        array, normalized_image_url, parse_track_with_privilege, performance_fixture_track,
+        value_i64, value_string, value_u64, CatalogItem,
     },
     music_api::{with_request_context, ApiFailure, MusicApiState},
+    performance::PerformanceState,
 };
 
 const MAX_POPULAR_TRACKS: usize = 100;
@@ -18,6 +19,8 @@ const ARTIST_ALBUM_LIMIT: u16 = 200;
 const ARTIST_OVERVIEW_VIDEO_LIMIT: u16 = 30;
 const ARTIST_VIDEO_PAGE_SIZE: u16 = 100;
 const MAX_SIMILAR_ARTISTS: usize = 12;
+const PERFORMANCE_ARTIST_FIRST_ID: i64 = 900_000;
+const PERFORMANCE_ARTIST_LAST_ID: i64 = 900_200;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +97,104 @@ pub struct ArtistVideoPage {
 #[serde(rename_all = "camelCase")]
 pub struct ArtistSubscription {
     followed: bool,
+}
+
+fn performance_cover(
+    performance_state: &PerformanceState,
+    kind: &str,
+    artist_id: i64,
+    index: usize,
+) -> String {
+    performance_state
+        .image_fixture_url(&format!("/clarus-perf/{kind}/{artist_id}/{index}.png"))
+        .unwrap_or_else(|| {
+            format!("https://p1.music.126.net/clarus-perf/{kind}/{artist_id}/{index}.png")
+        })
+}
+
+fn performance_artist_detail(
+    artist_id: i64,
+    performance_state: &PerformanceState,
+) -> Result<ArtistDetail, ApiFailure> {
+    if !(PERFORMANCE_ARTIST_FIRST_ID..=PERFORMANCE_ARTIST_LAST_ID).contains(&artist_id) {
+        return Err(ApiFailure::invalid(
+            "performance artistId is outside the fixture graph",
+        ));
+    }
+    let albums = (0..100)
+        .map(|index| ArtistAlbum {
+            id: artist_id * 1_000 + index as i64,
+            artist_id,
+            name: format!("Performance Album {artist_id}-{index}"),
+            cover_url: performance_cover(performance_state, "album", artist_id, index),
+            publish_time: 1_700_000_000_000 + index as u64,
+            album_type: "专辑".to_string(),
+            track_count: 12,
+            explicit: false,
+        })
+        .collect::<Vec<_>>();
+    let eps = (0..100)
+        .map(|index| ArtistAlbum {
+            id: artist_id * 1_000 + 100 + index as i64,
+            artist_id,
+            name: format!("Performance EP {artist_id}-{index}"),
+            cover_url: performance_cover(performance_state, "ep", artist_id, index),
+            publish_time: 1_700_000_100_000 + index as u64,
+            album_type: "EP/Single".to_string(),
+            track_count: 3,
+            explicit: false,
+        })
+        .collect::<Vec<_>>();
+    let videos = (0..usize::from(ARTIST_OVERVIEW_VIDEO_LIMIT))
+        .map(|index| ArtistVideo {
+            id: artist_id * 1_000 + 300 + index as i64,
+            artist_id,
+            name: format!("Performance Video {artist_id}-{index}"),
+            cover_url: performance_cover(performance_state, "video", artist_id, index),
+            publish_time: "2026-01-01".to_string(),
+        })
+        .collect();
+    let popular_tracks = (0..24)
+        .map(|index| {
+            let id = artist_id * 1_000 + 500 + index as i64;
+            performance_fixture_track(
+                id,
+                artist_id,
+                performance_cover(performance_state, "track", artist_id, index),
+            )
+        })
+        .collect();
+    let graph_size = PERFORMANCE_ARTIST_LAST_ID - PERFORMANCE_ARTIST_FIRST_ID + 1;
+    let similar_artists = (1..=MAX_SIMILAR_ARTISTS)
+        .map(|offset| {
+            let id = PERFORMANCE_ARTIST_FIRST_ID
+                + (artist_id - PERFORMANCE_ARTIST_FIRST_ID + offset as i64) % graph_size;
+            ArtistIdentity {
+                id,
+                name: format!("Performance Artist {id}"),
+                cover_url: performance_cover(performance_state, "similar", id, offset),
+            }
+        })
+        .collect();
+    Ok(ArtistDetail {
+        artist: ArtistProfile {
+            id: artist_id,
+            name: format!("Performance Artist {artist_id}"),
+            cover_url: performance_cover(performance_state, "hero", artist_id, 0),
+            brief_description: "Offline deterministic artist fixture".to_string(),
+            music_count: 24,
+            album_count: 200,
+            video_count: 30,
+            followed: false,
+        },
+        popular_tracks,
+        latest_release: albums.first().cloned(),
+        albums,
+        eps,
+        videos,
+        videos_has_more: false,
+        similar_artists,
+    })
 }
 
 fn artist_object(body: &Value) -> Option<&Value> {
@@ -455,9 +556,13 @@ pub async fn artist_detail(
     request_id: String,
     artist_id: i64,
     state: State<'_, MusicApiState>,
+    performance_state: State<'_, PerformanceState>,
 ) -> Result<ArtistDetail, ApiFailure> {
     if artist_id <= 0 {
         return Err(ApiFailure::invalid("artistId must be a positive integer"));
+    }
+    if performance_state.artist_fixtures_enabled() {
+        return performance_artist_detail(artist_id, &performance_state);
     }
     let (client, cookie, real_ip) = state.request_context().await;
     state

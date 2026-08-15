@@ -3,10 +3,10 @@ import { createApp, defineComponent, h, KeepAlive, nextTick, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import CoverImage from './CoverImage.vue'
 
-async function mountCover() {
+async function mountCover(attrs = '') {
   const Host = defineComponent({
     components: { CoverImage },
-    template: '<CoverImage source="https://img.test/cover.jpg" :width="1024" alt="cover" />',
+    template: `<CoverImage source="https://img.test/cover.jpg" :width="1024" alt="cover" ${attrs} />`,
   })
   const root = document.createElement('div')
   document.body.append(root)
@@ -16,9 +16,22 @@ async function mountCover() {
   return { app, root }
 }
 
-afterEach(() => document.body.replaceChildren())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  document.body.replaceChildren()
+})
 
 describe('CoverImage', () => {
+  it('renders a lazy image by default and honors an explicit loading value', async () => {
+    const defaultCover = await mountCover()
+    expect(defaultCover.root.querySelector('img')?.getAttribute('loading')).toBe('lazy')
+    defaultCover.app.unmount()
+
+    const eagerCover = await mountCover('loading="eager"')
+    expect(eagerCover.root.querySelector('img')?.getAttribute('loading')).toBe('eager')
+    eagerCover.app.unmount()
+  })
+
   it('retries the primary URL and then falls back to another artwork size', async () => {
     const { app, root } = await mountCover()
     const image = root.querySelector<HTMLImageElement>('img')
@@ -36,123 +49,118 @@ describe('CoverImage', () => {
     app.unmount()
   })
 
-  it('detaches an offscreen list cover while keeping its layout slot', async () => {
-    const observerState: { callback: ((entries: IntersectionObserverEntry[]) => void) | null } = {
-      callback: null,
-    }
+  it('changes its request only when the artwork source or requested dimensions change', async () => {
+    const root = document.createElement('div')
+    document.body.append(root)
+    const source = ref('https://img.test/first.jpg')
+    const width = ref(40)
+    const viewportUnload = ref(true)
+    const app = createApp({
+      setup() {
+        return () =>
+          h(CoverImage, {
+            source: source.value,
+            width: width.value,
+            role: 'row',
+            options: { pixelRatio: 1 },
+            viewportUnload: viewportUnload.value,
+            alt: 'cover',
+          })
+      },
+    })
+    app.mount(root)
+    await nextTick()
+
+    const image = root.querySelector<HTMLImageElement>('img')
+    const firstSource = image?.getAttribute('src')
+    expect(firstSource).toContain('/first.jpg')
+    expect(firstSource).toContain('param=96y96')
+
+    // The legacy prop is compatibility-only and cannot restart a request.
+    viewportUnload.value = false
+    await nextTick()
+    expect(image?.getAttribute('src')).toBe(firstSource)
+
+    source.value = 'https://img.test/second.jpg'
+    await nextTick()
+    expect(image?.getAttribute('src')).toContain('/second.jpg')
+    expect(image?.getAttribute('src')).toContain('param=96y96')
+
+    width.value = 100
+    await nextTick()
+    expect(image?.getAttribute('src')).toContain('/second.jpg')
+    expect(image?.getAttribute('src')).toContain('param=128y128')
+    app.unmount()
+  })
+
+  it('keeps a loaded src when an observer reports the image offscreen', async () => {
+    const observerState: {
+      callback: ((entries: IntersectionObserverEntry[]) => void) | null
+      instances: number
+    } = { callback: null, instances: 0 }
     class FakeIntersectionObserver {
-      constructor(next: (entries: IntersectionObserverEntry[]) => void) {
-        observerState.callback = next
+      constructor(callback: (entries: IntersectionObserverEntry[]) => void) {
+        observerState.instances += 1
+        observerState.callback = callback
       }
 
       observe(): void {}
       disconnect(): void {}
     }
     vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
-    try {
-      const Host = defineComponent({
-        components: { CoverImage },
-        template:
-          '<div class="app-content"><CoverImage source="https://img.test/cover.jpg" :width="40" role="row" viewport-unload alt="cover" /></div>',
-      })
-      const root = document.createElement('div')
-      document.body.append(root)
-      const app = createApp(Host)
-      app.mount(root)
-      await nextTick()
-      await nextTick()
-      const image = root.querySelector<HTMLImageElement>('img')
-      observerState.callback?.([{ isIntersecting: true } as IntersectionObserverEntry])
-      await nextTick()
-      expect(image?.getAttribute('src')).toContain('param=96y96')
 
-      observerState.callback?.([{ isIntersecting: false } as IntersectionObserverEntry])
-      await nextTick()
-      expect(image?.getAttribute('src')).toMatch(/^data:image\/gif/)
-      expect(image?.getAttribute('data-cover-state')).toBe('idle')
+    const Host = defineComponent({
+      components: { CoverImage },
+      template:
+        '<div class="app-content"><CoverImage source="https://img.test/cover.jpg" :width="40" role="row" viewport-unload alt="cover" /></div>',
+    })
+    const root = document.createElement('div')
+    document.body.append(root)
+    const app = createApp(Host)
+    app.mount(root)
+    await nextTick()
 
-      observerState.callback?.([{ isIntersecting: true } as IntersectionObserverEntry])
-      await nextTick()
-      expect(image?.getAttribute('src')).toContain('param=96y96')
-      app.unmount()
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
-
-  it('releases a viewport-managed image while its kept-alive page is hidden', async () => {
-    class FakeIntersectionObserver {
-      private readonly callback: (entries: IntersectionObserverEntry[]) => void
-
-      constructor(callback: (entries: IntersectionObserverEntry[]) => void) {
-        this.callback = callback
-      }
-
-      observe(): void {
-        this.callback([{ isIntersecting: true } as IntersectionObserverEntry])
-      }
-
-      disconnect(): void {}
-    }
-    vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
-    try {
-      const root = document.createElement('main')
-      root.className = 'app-content'
-      document.body.append(root)
-      const active = ref(true)
-      const app = createApp({
-        setup() {
-          return () =>
-            h(KeepAlive, null, {
-              default: () =>
-                active.value
-                  ? h(CoverImage, {
-                      source: 'https://img.test/cover.jpg',
-                      width: 40,
-                      role: 'row',
-                      viewportUnload: true,
-                      alt: 'cover',
-                    })
-                  : h('div'),
-            })
-        },
-      })
-      app.mount(root)
-      await nextTick()
-      await nextTick()
-      const image = root.querySelector<HTMLImageElement>('img')
-      expect(image?.getAttribute('src')).toContain('param=96y96')
-
-      active.value = false
-      await nextTick()
-      expect(image?.getAttribute('src')).toMatch(/^data:image\/gif/)
-
-      active.value = true
-      await nextTick()
-      await nextTick()
-      await new Promise((resolve) => globalThis.setTimeout(resolve, 0))
-      expect(root.querySelector<HTMLImageElement>('img')?.getAttribute('src')).toContain(
-        'param=96y96',
-      )
-      app.unmount()
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
-
-  it('drops full-size artwork when a detail view unmounts', async () => {
-    const { app, root } = await mountCover()
     const image = root.querySelector<HTMLImageElement>('img')
-    expect(image?.getAttribute('src')).toContain('param=1024y1024')
+    image?.dispatchEvent(new Event('load'))
+    await nextTick()
+    const loadedSource = image?.getAttribute('src')
+    expect(loadedSource).toContain('param=96y96')
+    expect(image?.getAttribute('data-cover-state')).toBe('loaded')
 
+    observerState.callback?.([{ isIntersecting: false } as IntersectionObserverEntry])
+    await nextTick()
+    expect(observerState.instances).toBe(0)
+    expect(image?.getAttribute('src')).toBe(loadedSource)
+    expect(image?.getAttribute('data-cover-state')).toBe('loaded')
     app.unmount()
-
-    expect(image?.getAttribute('src')).toMatch(/^data:image\/gif/)
   })
 
-  it('releases non-list artwork while its kept-alive page is hidden', async () => {
+  it('keeps a loaded src during ordinary scrolling', async () => {
+    const Host = defineComponent({
+      components: { CoverImage },
+      template:
+        '<div class="app-content"><CoverImage source="https://img.test/cover.jpg" :width="40" role="row" viewport-unload alt="cover" /></div>',
+    })
+    const root = document.createElement('div')
+    document.body.append(root)
+    const app = createApp(Host)
+    app.mount(root)
+    await nextTick()
+
+    const image = root.querySelector<HTMLImageElement>('img')
+    image?.dispatchEvent(new Event('load'))
+    await nextTick()
+    const loadedSource = image?.getAttribute('src')
+    root.querySelector<HTMLElement>('.app-content')?.dispatchEvent(new Event('scroll'))
+    await nextTick()
+
+    expect(image?.getAttribute('src')).toBe(loadedSource)
+    expect(image?.getAttribute('data-cover-state')).toBe('loaded')
+    app.unmount()
+  })
+
+  it('keeps the same loaded source across KeepAlive deactivation and activation', async () => {
     const root = document.createElement('main')
-    root.className = 'app-content'
     document.body.append(root)
     const active = ref(true)
     const app = createApp({
@@ -163,8 +171,10 @@ describe('CoverImage', () => {
               active.value
                 ? h(CoverImage, {
                     source: 'https://img.test/cover.jpg',
-                    width: 232,
-                    role: 'hero',
+                    width: 40,
+                    role: 'row',
+                    viewportUnload: true,
+                    loading: 'eager',
                     alt: 'cover',
                   })
                 : h('div'),
@@ -173,27 +183,35 @@ describe('CoverImage', () => {
     })
     app.mount(root)
     await nextTick()
+
     const image = root.querySelector<HTMLImageElement>('img')
-    expect(image?.getAttribute('src')).toContain('param=256y256')
+    image?.dispatchEvent(new Event('load'))
+    await nextTick()
+    const loadedSource = image?.getAttribute('src')
+    expect(loadedSource).toContain('param=96y96')
 
     active.value = false
     await nextTick()
-    expect(image?.getAttribute('src')).toMatch(/^data:image\/gif/)
+    expect(image?.getAttribute('src')).toBe(loadedSource)
+    expect(image?.getAttribute('data-cover-state')).toBe('loaded')
+    expect(image?.getAttribute('loading')).toBe('eager')
 
     active.value = true
     await nextTick()
-    await nextTick()
-    await new Promise((resolve) => globalThis.setTimeout(resolve, 0))
-    expect(root.querySelector<HTMLImageElement>('img')?.getAttribute('src')).toContain(
-      'param=256y256',
-    )
+    const restoredImage = root.querySelector<HTMLImageElement>('img')
+    expect(restoredImage).toBe(image)
+    expect(restoredImage?.getAttribute('src')).toBe(loadedSource)
+    expect(restoredImage?.getAttribute('data-cover-state')).toBe('loaded')
+    expect(restoredImage?.getAttribute('loading')).toBe('eager')
     app.unmount()
   })
 
-  it('releases a visible cover while the WebView is backgrounded', async () => {
+  it('does not replace a loaded src when the document is backgrounded', async () => {
     const { app, root } = await mountCover()
     const image = root.querySelector<HTMLImageElement>('img')
-    expect(image?.getAttribute('src')).toContain('param=1024y1024')
+    image?.dispatchEvent(new Event('load'))
+    await nextTick()
+    const loadedSource = image?.getAttribute('src')
 
     const originalVisibility = document.visibilityState
     Object.defineProperty(document, 'visibilityState', {
@@ -203,16 +221,8 @@ describe('CoverImage', () => {
     try {
       document.dispatchEvent(new Event('visibilitychange'))
       await nextTick()
-      expect(image?.getAttribute('src')).toMatch(/^data:image\/gif/)
-
-      Object.defineProperty(document, 'visibilityState', {
-        configurable: true,
-        value: 'visible',
-      })
-      document.dispatchEvent(new Event('visibilitychange'))
-      await nextTick()
-      await nextTick()
-      expect(image?.getAttribute('src')).toContain('param=1024y1024')
+      expect(image?.getAttribute('src')).toBe(loadedSource)
+      expect(image?.getAttribute('data-cover-state')).toBe('loaded')
     } finally {
       Object.defineProperty(document, 'visibilityState', {
         configurable: true,
@@ -220,5 +230,17 @@ describe('CoverImage', () => {
       })
       app.unmount()
     }
+  })
+
+  it('leaves the source intact when the component truly unmounts', async () => {
+    const { app, root } = await mountCover()
+    const image = root.querySelector<HTMLImageElement>('img')
+    const source = image?.getAttribute('src')
+
+    app.unmount()
+
+    // The node is detached by Vue; no transparent replacement is needed to
+    // release it, and a retained reference must not observe a src rewrite.
+    expect(image?.getAttribute('src')).toBe(source)
   })
 })

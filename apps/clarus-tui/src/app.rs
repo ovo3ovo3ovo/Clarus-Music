@@ -8,7 +8,7 @@ use std::{
 use clarus_core::{
     AuthSession, AuthUser, CachedAudio, CoreError, DailySongs, MusicCore, PlaybackQueue,
     PlaylistDetail, PlaylistPage, PlaylistScope, PlaylistSummary, QrLogin, QrLoginCheck,
-    QrLoginStatus, QueueSource, RequestCancellation, StreamSource, Track, TrackLyrics,
+    QrLoginStatus, QueueSource, RequestCancellation, SmsLogin, StreamSource, Track, TrackLyrics,
 };
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -105,12 +105,61 @@ impl Focus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Navigation,
+    PhoneNumber,
+    Captcha,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PopupState {
-    None,
-    QrLogin,
+pub enum LoginField {
+    PhoneNumber,
+    Captcha,
+}
+
+impl LoginField {
+    fn next(self, captcha_sent: bool) -> Self {
+        if !captcha_sent {
+            return Self::PhoneNumber;
+        }
+        match self {
+            Self::PhoneNumber => Self::Captcha,
+            Self::Captcha => Self::PhoneNumber,
+        }
+    }
+
+    fn input_mode(self) -> InputMode {
+        match self {
+            Self::PhoneNumber => InputMode::PhoneNumber,
+            Self::Captcha => InputMode::Captcha,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneLogin {
+    pub phone: String,
+    pub captcha: String,
+    pub field: LoginField,
+    pub captcha_sent: bool,
+    pub sending: bool,
+    pub authenticating: bool,
+    pub resend_available_at: Option<Instant>,
+    pub status: String,
+}
+
+impl PhoneLogin {
+    #[allow(dead_code)] // Retained SMS flow; no public TUI route constructs it.
+    fn new(status: impl Into<String>) -> Self {
+        Self {
+            phone: String::new(),
+            captcha: String::new(),
+            field: LoginField::PhoneNumber,
+            captcha_sent: false,
+            sending: false,
+            authenticating: false,
+            resend_available_at: None,
+            status: status.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,12 +197,20 @@ pub enum Screen {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthState {
     Restoring,
-    Login {
+    /// The only interactive login screen reachable from the TUI.
+    QrLogin {
         qr: Option<QrLogin>,
         status: String,
         checking: bool,
     },
+    /// Retained for the SMS implementation and its isolated tests. The binary
+    /// does not create this state from a flag, shortcut, or login UI route.
+    #[allow(dead_code)]
+    Login {
+        form: PhoneLogin,
+    },
     Authenticated(AuthUser),
+    #[allow(dead_code)]
     Failed(String),
 }
 
@@ -296,6 +353,14 @@ pub enum Message {
         generation: u64,
         result: Result<QrLoginCheck, CoreError>,
     },
+    CaptchaSent {
+        generation: u64,
+        result: Result<(), CoreError>,
+    },
+    SmsLogin {
+        generation: u64,
+        result: Result<SmsLogin, CoreError>,
+    },
     Daily {
         generation: u64,
         result: Result<DailySongs, CoreError>,
@@ -349,7 +414,6 @@ pub struct App {
     pub nav: NavItem,
     pub focus: Focus,
     pub input_mode: InputMode,
-    pub popup: PopupState,
     pub screen: Screen,
     pub content: Content,
     pub content_index: usize,
@@ -390,10 +454,12 @@ pub struct App {
     cache_cancellation: Option<RequestCancellation>,
     audio_cancellation: Option<RequestCancellation>,
     qr_cancellation: Option<RequestCancellation>,
+    auth_cancellation: Option<RequestCancellation>,
     next_qr_check: Instant,
     qr_expires_at: Option<Instant>,
     session_generation: u64,
     qr_generation: u64,
+    auth_generation: u64,
     pending_content_position: Option<PendingContentPosition>,
     playlist_return: Option<PlaylistReturn>,
     pending_auth_notice: Option<String>,
@@ -404,6 +470,7 @@ pub struct App {
     cache_task: Option<JoinHandle<()>>,
     audio_task: Option<JoinHandle<()>>,
     qr_task: Option<JoinHandle<()>>,
+    auth_task: Option<JoinHandle<()>>,
     audio: NativePlayer,
     /// `spawn_blocking` cannot interrupt an OS audio/device call once it has
     /// entered it. Serialize those calls and let stale generations leave
@@ -415,22 +482,25 @@ pub struct App {
 
 const TRACKPAD_SCROLL_INTERVAL: Duration = Duration::from_millis(120);
 const QR_VALIDITY: Duration = Duration::from_secs(180);
+const SMS_RESEND_COOLDOWN: Duration = Duration::from_secs(60);
+const MAX_PHONE_DIGITS: usize = 15;
+const MAX_CAPTCHA_DIGITS: usize = 8;
 
 impl App {
     pub fn new(core: Arc<MusicCore>, tx: mpsc::Sender<Message>) -> Self {
         let mut app = Self::initial(core, tx);
+        // The TUI has its own Keychain item rather than sharing the desktop
+        // client's ACL-protected item. Restore it once, then fall back to QR.
         app.restore_session();
         app
     }
 
-    /// Starts the login flow with a terminal QR code without reading the
-    /// system Keychain at startup. The normal constructor intentionally
-    /// restores the saved session first; this explicit path is useful when a
-    /// listener wants to avoid a pending macOS credential sheet and
-    /// authenticate afresh.
-    pub fn new_for_qr_login(core: Arc<MusicCore>, tx: mpsc::Sender<Message>) -> Self {
+    /// Retained for internal SMS-flow coverage. The binary deliberately has
+    /// no public option or key path that calls this constructor.
+    #[allow(dead_code)]
+    pub fn new_for_phone_login(core: Arc<MusicCore>, tx: mpsc::Sender<Message>) -> Self {
         let mut app = Self::initial(core, tx);
-        app.begin_qr();
+        app.begin_phone_login();
         app
     }
 
@@ -442,7 +512,6 @@ impl App {
             nav: NavItem::Daily,
             focus: Focus::Navigation,
             input_mode: InputMode::Navigation,
-            popup: PopupState::None,
             screen: Screen::Home,
             content: Content::Loading {
                 label: "正在恢复登录状态…".to_string(),
@@ -481,10 +550,12 @@ impl App {
             cache_cancellation: None,
             audio_cancellation: None,
             qr_cancellation: None,
+            auth_cancellation: None,
             next_qr_check: Instant::now(),
             qr_expires_at: None,
             session_generation: 0,
             qr_generation: 0,
+            auth_generation: 0,
             pending_content_position: None,
             playlist_return: None,
             pending_auth_notice: None,
@@ -495,6 +566,7 @@ impl App {
             cache_task: None,
             audio_task: None,
             qr_task: None,
+            auth_task: None,
             audio: NativePlayer::default(),
             audio_prepare_lock: Arc::new(std::sync::Mutex::new(())),
             audio_prepare_generation: Arc::new(AtomicU64::new(0)),
@@ -561,6 +633,9 @@ impl App {
                 changed = true;
             }
         }
+        if self.update_sms_resend_status(now) {
+            changed = true;
+        }
         if self
             .qr_expires_at
             .is_some_and(|expires_at| now >= expires_at)
@@ -572,7 +647,7 @@ impl App {
         }
         let needs_qr_poll = matches!(
             self.auth,
-            AuthState::Login {
+            AuthState::QrLogin {
                 qr: Some(_),
                 checking: false,
                 ..
@@ -610,9 +685,15 @@ impl App {
                 next = next.min(lyric_wait.max(Duration::from_millis(1)));
             }
         }
+        if let AuthState::Login { form } = &self.auth {
+            if let Some(available_at) = form.resend_available_at {
+                let until_update = available_at.saturating_duration_since(now);
+                next = next.min(until_update.min(Duration::from_secs(1)));
+            }
+        }
         if matches!(
             self.auth,
-            AuthState::Login {
+            AuthState::QrLogin {
                 qr: Some(_),
                 checking: false,
                 ..
@@ -650,21 +731,14 @@ impl App {
                         };
                         self.qr_expires_at = None;
                         self.auth = AuthState::Authenticated(user);
-                        self.popup = PopupState::None;
+                        self.input_mode = InputMode::Navigation;
                         self.status = self
                             .pending_auth_notice
                             .take()
                             .unwrap_or_else(|| "已恢复登录状态".to_string());
                         self.open_nav(NavItem::Daily);
                     }
-                    Ok(_) => self.begin_qr(),
-                    Err(error) => {
-                        self.auth = AuthState::Failed(error.to_string());
-                        self.content = Content::Error {
-                            message: "无法读取登录状态。按 r 或 Esc 使用二维码登录。".to_string(),
-                        };
-                        self.status = error.to_string();
-                    }
+                    Ok(_) | Err(_) => self.begin_qr(),
                 }
             }
             Message::Qr { generation, result } => {
@@ -676,25 +750,25 @@ impl App {
                 match result {
                     Ok(qr) => {
                         self.qr_expires_at = Some(Instant::now() + QR_VALIDITY);
-                        self.auth = AuthState::Login {
+                        self.auth = AuthState::QrLogin {
                             qr: Some(qr),
                             status: "请使用网易云音乐扫描二维码".to_string(),
                             checking: false,
                         };
-                        self.popup = PopupState::QrLogin;
+                        self.input_mode = InputMode::Navigation;
                         self.content = Content::Empty;
                         self.status = "等待二维码扫描".to_string();
                         self.next_qr_check = Instant::now() + Duration::from_millis(700);
                     }
                     Err(error) => {
                         self.qr_expires_at = None;
-                        self.auth = AuthState::Login {
+                        self.auth = AuthState::QrLogin {
                             qr: None,
                             status: format!("二维码加载失败：{error}"),
                             checking: false,
                         };
-                        self.popup = PopupState::QrLogin;
-                        self.status = "按 r 重试二维码登录".to_string();
+                        self.input_mode = InputMode::Navigation;
+                        self.status = "按 r 或 Enter 重试二维码登录".to_string();
                     }
                 }
             }
@@ -724,27 +798,35 @@ impl App {
                             } else {
                                 "登录成功，正在加载音乐库…".to_string()
                             };
-                            // The authorized QR response still needs one
-                            // in-memory session validation before the library
-                            // can open. Expose that phase explicitly so Esc
-                            // cancels the restore task too, rather than
-                            // leaving a Login state whose late result could
-                            // unexpectedly authenticate after the user backs
-                            // out.
+                            // The QR authorization saved an in-memory cookie.
+                            // Validate it once before opening the library, and
+                            // keep Esc able to cancel that final transition.
                             self.auth = AuthState::Restoring;
-                            self.popup = PopupState::None;
                             self.restore_session();
                         }
                         QrLoginStatus::Expired => self.begin_qr(),
                         status => {
-                            if let AuthState::Login { qr, .. } = &self.auth {
-                                self.auth = AuthState::Login {
+                            // The service's 802 copy is inconsistent across
+                            // endpoints and often only says “waiting”.  The
+                            // state code is the reliable signal here, so make
+                            // the required phone-side confirmation explicit.
+                            let status_message = match status {
+                                QrLoginStatus::Scanned => {
+                                    "已扫码，请在网易云音乐 App 中确认登录".to_string()
+                                }
+                                QrLoginStatus::Waiting => "等待扫描二维码".to_string(),
+                                QrLoginStatus::Authorized | QrLoginStatus::Expired => {
+                                    check.message.clone()
+                                }
+                            };
+                            if let AuthState::QrLogin { qr, .. } = &self.auth {
+                                self.auth = AuthState::QrLogin {
                                     qr: qr.clone(),
-                                    status: check.message.clone(),
+                                    status: status_message.clone(),
                                     checking: false,
                                 };
                             }
-                            self.status = check.message;
+                            self.status = status_message;
                             self.next_qr_check = Instant::now()
                                 + Duration::from_millis(match status {
                                     QrLoginStatus::Scanned => 1_000,
@@ -753,8 +835,8 @@ impl App {
                         }
                     },
                     Err(error) => {
-                        if let AuthState::Login { qr, .. } = &self.auth {
-                            self.auth = AuthState::Login {
+                        if let AuthState::QrLogin { qr, .. } = &self.auth {
+                            self.auth = AuthState::QrLogin {
                                 qr: qr.clone(),
                                 status: format!("登录检查失败：{error}"),
                                 checking: false,
@@ -762,6 +844,69 @@ impl App {
                         }
                         self.status = "二维码检查失败，将重试".to_string();
                         self.next_qr_check = Instant::now() + Duration::from_secs(3);
+                    }
+                }
+            }
+            Message::CaptchaSent { generation, result } => {
+                if generation != self.auth_generation {
+                    return;
+                }
+                self.auth_task = None;
+                self.auth_cancellation = None;
+                let (status, input_mode) = match &mut self.auth {
+                    AuthState::Login { form } => match result {
+                        Ok(()) => {
+                            form.sending = false;
+                            form.captcha_sent = true;
+                            form.field = LoginField::Captcha;
+                            form.resend_available_at = Some(Instant::now() + SMS_RESEND_COOLDOWN);
+                            form.status = format!(
+                                "验证码已发送，请输入短信验证码 · {}s 后可重发",
+                                SMS_RESEND_COOLDOWN.as_secs()
+                            );
+                            (form.status.clone(), InputMode::Captcha)
+                        }
+                        Err(error) => {
+                            form.sending = false;
+                            form.resend_available_at = None;
+                            form.status = format!("验证码发送失败：{error}");
+                            (form.status.clone(), form.field.input_mode())
+                        }
+                    },
+                    _ => return,
+                };
+                self.input_mode = input_mode;
+                self.status = status;
+            }
+            Message::SmsLogin { generation, result } => {
+                if generation != self.auth_generation {
+                    return;
+                }
+                self.auth_task = None;
+                self.auth_cancellation = None;
+                match result {
+                    Ok(SmsLogin {
+                        user,
+                        saved_to_keychain,
+                    }) => {
+                        self.auth = AuthState::Authenticated(user);
+                        self.input_mode = InputMode::Navigation;
+                        self.status = if saved_to_keychain {
+                            "登录成功，正在加载音乐库…".to_string()
+                        } else {
+                            "登录成功；本次登录态未能保存到系统 Keychain".to_string()
+                        };
+                        self.open_nav(NavItem::Daily);
+                    }
+                    Err(error) => {
+                        let failure = sms_login_failure_status(&error);
+                        if let AuthState::Login { form } = &mut self.auth {
+                            form.authenticating = false;
+                            form.status = failure.form_status;
+                        } else {
+                            return;
+                        }
+                        self.status = failure.header_status;
                     }
                 }
             }
@@ -1098,41 +1243,24 @@ impl App {
         {
             return true;
         }
-        if !matches!(self.input_mode, InputMode::Navigation) {
-            return false;
-        }
         if matches!(
             self.auth,
-            AuthState::Restoring | AuthState::Login { .. } | AuthState::Failed(_)
+            AuthState::Restoring
+                | AuthState::QrLogin { .. }
+                | AuthState::Login { .. }
+                | AuthState::Failed(_)
         ) {
-            match event.code {
-                KeyCode::Char('r') | KeyCode::Enter => {
-                    self.last_input_changed = true;
-                    self.retry_auth();
-                }
-                KeyCode::Esc => {
-                    self.last_input_changed = true;
-                    if matches!(&self.auth, AuthState::Restoring | AuthState::Failed(_)) {
-                        // A platform credential store can be waiting behind
-                        // a permission prompt. Both r/Enter and Esc are
-                        // escape hatches here: they start QR instead of
-                        // issuing another Keychain operation.
-                        self.begin_qr();
-                    } else {
-                        self.cancel_qr();
-                    }
-                }
-                _ => {}
-            }
+            self.handle_auth_key(event);
+            return false;
+        }
+        if !matches!(self.input_mode, InputMode::Navigation) {
             return false;
         }
 
         if event.code == KeyCode::Esc && matches!(self.content, Content::NoPermission { .. }) {
             self.last_input_changed = true;
-            // An expired session must have a reachable recovery path. Keep
-            // the explicit no-permission state visible until the QR request
-            // completes, but do not force the listener to leave the TUI and
-            // restart the process just to authenticate again.
+            // An expired session must have a reachable recovery path without
+            // forcing a restart or another automatic Keychain operation.
             self.begin_qr();
             return false;
         }
@@ -1223,6 +1351,201 @@ impl App {
 
     pub fn key_changed(&self) -> bool {
         self.last_input_changed
+    }
+
+    /// Routes login input before player/navigation shortcuts are considered.
+    /// QR is the sole normal route; the SMS branch remains isolated so its
+    /// retained implementation cannot leak shortcuts into the library.
+    fn handle_auth_key(&mut self, event: KeyEvent) {
+        match &self.auth {
+            AuthState::Restoring | AuthState::Failed(_) => match event.code {
+                KeyCode::Char('r') | KeyCode::Enter | KeyCode::Esc => {
+                    self.last_input_changed = true;
+                    self.begin_qr();
+                }
+                _ => {}
+            },
+            AuthState::QrLogin { .. } => match event.code {
+                KeyCode::Char('r') | KeyCode::Enter => {
+                    self.last_input_changed = true;
+                    self.begin_qr();
+                }
+                KeyCode::Esc => {
+                    self.last_input_changed = true;
+                    self.cancel_qr();
+                }
+                _ => {}
+            },
+            AuthState::Login { .. } => match event.code {
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.last_input_changed = true;
+                    let next = match &self.auth {
+                        AuthState::Login { form } => form.field.next(form.captcha_sent),
+                        _ => return,
+                    };
+                    if next == LoginField::PhoneNumber
+                        && matches!(
+                            &self.auth,
+                            AuthState::Login {
+                                form: PhoneLogin {
+                                    captcha_sent: false,
+                                    ..
+                                }
+                            }
+                        )
+                    {
+                        self.set_login_status("请先发送验证码".to_string());
+                    } else {
+                        self.set_login_field(next);
+                    }
+                }
+                KeyCode::Enter => {
+                    self.last_input_changed = true;
+                    let field = match &self.auth {
+                        AuthState::Login { form } => form.field,
+                        _ => return,
+                    };
+                    if field == LoginField::PhoneNumber {
+                        self.request_sms_captcha();
+                    } else {
+                        self.submit_sms_login();
+                    }
+                }
+                KeyCode::Char('r') if event.modifiers.is_empty() => {
+                    self.last_input_changed = true;
+                    self.request_sms_captcha();
+                }
+                KeyCode::Esc => {
+                    self.last_input_changed = true;
+                    self.cancel_phone_login();
+                }
+                KeyCode::Backspace => {
+                    self.last_input_changed = self.delete_login_character();
+                }
+                KeyCode::Char(character)
+                    if event.modifiers.is_empty() && character.is_ascii_digit() =>
+                {
+                    self.last_input_changed = self.push_login_character(character);
+                }
+                _ => {}
+            },
+            AuthState::Authenticated(_) => {}
+        }
+    }
+
+    /// Pastes only ASCII digits into the active login field. Terminal paste
+    /// is useful for one-time codes, but filtering it here prevents control
+    /// sequences and formatting characters from becoming part of a request.
+    pub fn handle_paste(&mut self, value: &str) -> bool {
+        self.last_input_changed = false;
+        let digits = value
+            .bytes()
+            .filter(u8::is_ascii_digit)
+            .map(char::from)
+            .collect::<String>();
+        if digits.is_empty() {
+            return false;
+        }
+        let status = match &mut self.auth {
+            AuthState::Login { form } if !form.sending && !form.authenticating => {
+                match form.field {
+                    LoginField::PhoneNumber => {
+                        invalidate_captcha_for_phone_change(form);
+                        let remaining = MAX_PHONE_DIGITS.saturating_sub(form.phone.len());
+                        form.phone.extend(digits.chars().take(remaining));
+                        form.status = "已粘贴手机号".to_string();
+                    }
+                    LoginField::Captcha => {
+                        let remaining = MAX_CAPTCHA_DIGITS.saturating_sub(form.captcha.len());
+                        form.captcha.extend(digits.chars().take(remaining));
+                        form.status = "已粘贴验证码".to_string();
+                    }
+                }
+                form.status.clone()
+            }
+            _ => return false,
+        };
+        self.status = status;
+        self.last_input_changed = true;
+        true
+    }
+
+    fn set_login_status(&mut self, status: String) {
+        if let AuthState::Login { form } = &mut self.auth {
+            form.status = status.clone();
+        }
+        self.status = status;
+    }
+
+    fn set_login_field(&mut self, field: LoginField) {
+        if let AuthState::Login { form } = &mut self.auth {
+            if field == LoginField::Captcha && !form.captcha_sent {
+                form.status = "请先发送验证码".to_string();
+                self.status = form.status.clone();
+                return;
+            }
+            form.field = field;
+            self.input_mode = field.input_mode();
+            form.status = match field {
+                LoginField::PhoneNumber => "输入手机号后按 Enter 发送验证码".to_string(),
+                LoginField::Captcha => "输入验证码后按 Enter 登录".to_string(),
+            };
+            self.status = form.status.clone();
+        }
+    }
+
+    fn push_login_character(&mut self, character: char) -> bool {
+        let status = match &mut self.auth {
+            AuthState::Login { form } if !form.sending && !form.authenticating => {
+                match form.field {
+                    LoginField::PhoneNumber => {
+                        invalidate_captcha_for_phone_change(form);
+                        if form.phone.len() >= MAX_PHONE_DIGITS {
+                            form.status = format!("手机号最多 {MAX_PHONE_DIGITS} 位");
+                        } else {
+                            form.phone.push(character);
+                            form.status = "输入手机号后按 Enter 发送验证码".to_string();
+                        }
+                    }
+                    LoginField::Captcha => {
+                        if form.captcha.len() >= MAX_CAPTCHA_DIGITS {
+                            form.status = format!("验证码最多 {MAX_CAPTCHA_DIGITS} 位");
+                        } else {
+                            form.captcha.push(character);
+                            form.status = "输入验证码后按 Enter 登录".to_string();
+                        }
+                    }
+                }
+                form.status.clone()
+            }
+            _ => return false,
+        };
+        self.status = status;
+        true
+    }
+
+    fn delete_login_character(&mut self) -> bool {
+        let status = match &mut self.auth {
+            AuthState::Login { form } if !form.sending && !form.authenticating => {
+                match form.field {
+                    LoginField::PhoneNumber => {
+                        invalidate_captcha_for_phone_change(form);
+                        form.phone.pop();
+                        "输入手机号后按 Enter 发送验证码".to_string()
+                    }
+                    LoginField::Captcha => {
+                        form.captcha.pop();
+                        "输入验证码后按 Enter 登录".to_string()
+                    }
+                }
+            }
+            _ => return false,
+        };
+        if let AuthState::Login { form } = &mut self.auth {
+            form.status = status.clone();
+        }
+        self.status = status;
+        true
     }
 
     pub fn handle_mouse(&mut self, event: MouseEvent) -> bool {
@@ -1321,9 +1644,11 @@ impl App {
 
     fn begin_qr(&mut self) {
         // If QR is entered while a Keychain restore is still pending, its
-        // eventual result must not be allowed to overwrite the login screen.
+        // eventual result must not overwrite the login screen.
         self.session_generation = self.session_generation.wrapping_add(1);
         cancel_request(&mut self.session_task, &mut self.session_cancellation);
+        cancel_request(&mut self.auth_task, &mut self.auth_cancellation);
+        self.auth_generation = self.auth_generation.wrapping_add(1);
         cancel_request(&mut self.qr_task, &mut self.qr_cancellation);
         self.qr_generation = self.qr_generation.wrapping_add(1);
         self.qr_expires_at = None;
@@ -1331,11 +1656,13 @@ impl App {
         let generation = self.qr_generation;
         let cancellation = RequestCancellation::new();
         self.qr_cancellation = Some(cancellation.clone());
-        self.auth = AuthState::Login {
+        self.auth = AuthState::QrLogin {
             qr: None,
             status: "正在生成二维码…".to_string(),
             checking: false,
         };
+        self.input_mode = InputMode::Navigation;
+        self.content = Content::Empty;
         self.status = "正在生成二维码…".to_string();
         let core = Arc::clone(&self.core);
         let tx = self.tx.clone();
@@ -1351,7 +1678,7 @@ impl App {
 
     fn check_qr(&mut self) {
         let key = match &self.auth {
-            AuthState::Login {
+            AuthState::QrLogin {
                 qr: Some(qr),
                 checking: false,
                 ..
@@ -1362,12 +1689,18 @@ impl App {
         let generation = self.qr_generation;
         let cancellation = RequestCancellation::new();
         self.qr_cancellation = Some(cancellation.clone());
-        if let AuthState::Login { qr, status, .. } = &self.auth {
-            self.auth = AuthState::Login {
+        if let AuthState::QrLogin { qr, status, .. } = &self.auth {
+            let checking_status = if status.starts_with("已扫码") {
+                "已扫码，正在等待手机确认…".to_string()
+            } else {
+                "正在检查扫码状态…".to_string()
+            };
+            self.auth = AuthState::QrLogin {
                 qr: qr.clone(),
-                status: status.clone(),
+                status: checking_status.clone(),
                 checking: true,
             };
+            self.status = checking_status;
         }
         let core = Arc::clone(&self.core);
         let tx = self.tx.clone();
@@ -1385,13 +1718,13 @@ impl App {
         cancel_request(&mut self.qr_task, &mut self.qr_cancellation);
         self.qr_generation = self.qr_generation.wrapping_add(1);
         self.qr_expires_at = None;
-        if matches!(self.auth, AuthState::Login { .. }) {
-            self.auth = AuthState::Login {
+        if matches!(self.auth, AuthState::QrLogin { .. }) {
+            self.auth = AuthState::QrLogin {
                 qr: None,
                 status: "二维码登录已取消".to_string(),
                 checking: false,
             };
-            self.status = "按 r 重新生成二维码".to_string();
+            self.status = "按 r 或 Enter 重新生成二维码".to_string();
         }
     }
 
@@ -1399,14 +1732,13 @@ impl App {
         cancel_request(&mut self.qr_task, &mut self.qr_cancellation);
         self.qr_generation = self.qr_generation.wrapping_add(1);
         self.qr_expires_at = None;
-        if let AuthState::Login { qr, .. } = &self.auth {
-            self.auth = AuthState::Login {
+        if let AuthState::QrLogin { qr, .. } = &self.auth {
+            self.auth = AuthState::QrLogin {
                 qr: qr.clone(),
-                status: "二维码已过期，请按 r 重新生成".to_string(),
+                status: "二维码已过期，请按 r 或 Enter 重新生成".to_string(),
                 checking: false,
             };
-            self.popup = PopupState::QrLogin;
-            self.status = "二维码已过期，请按 r 重新生成".to_string();
+            self.status = "二维码已过期，请按 r 或 Enter 重新生成".to_string();
             self.next_qr_check = Instant::now() + Duration::from_secs(60);
         }
     }
@@ -1416,7 +1748,7 @@ impl App {
             return false;
         };
         let remaining_seconds = expires_at.saturating_duration_since(now).as_secs().max(1);
-        let AuthState::Login {
+        let AuthState::QrLogin {
             status,
             checking: false,
             qr: Some(_),
@@ -1434,13 +1766,209 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
+    fn begin_phone_login(&mut self) {
+        // If phone login is selected while a Keychain restore is still
+        // pending, its eventual result must not overwrite the explicit form.
+        self.session_generation = self.session_generation.wrapping_add(1);
+        cancel_request(&mut self.session_task, &mut self.session_cancellation);
+        cancel_request(&mut self.qr_task, &mut self.qr_cancellation);
+        self.qr_generation = self.qr_generation.wrapping_add(1);
+        self.qr_expires_at = None;
+        cancel_request(&mut self.auth_task, &mut self.auth_cancellation);
+        self.auth_generation = self.auth_generation.wrapping_add(1);
+        let form = PhoneLogin::new("输入 +86 手机号后按 Enter 发送验证码");
+        self.auth = AuthState::Login { form };
+        self.input_mode = InputMode::PhoneNumber;
+        self.content = Content::Empty;
+        self.status = "手机验证码登录".to_string();
+    }
+
+    fn request_sms_captcha(&mut self) {
+        let now = Instant::now();
+        let phone = match &self.auth {
+            AuthState::Login { form } => {
+                if form.sending || form.authenticating {
+                    return;
+                }
+                // A risk/rejection response must be acknowledged by an
+                // explicit reset (Esc, edit, or field change), not converted
+                // into another immediate SMS request by `r`.
+                if is_terminal_sms_login_failure(&form.status) {
+                    return;
+                }
+                if let Some(available_at) = form.resend_available_at.filter(|at| *at > now) {
+                    let seconds = available_at.saturating_duration_since(now).as_secs().max(1);
+                    self.set_login_status(format!(
+                        "验证码已发送，请输入短信验证码 · {seconds}s 后可重发"
+                    ));
+                    return;
+                }
+                form.phone.clone()
+            }
+            _ => return,
+        };
+        if !valid_phone(&phone) {
+            self.set_login_status("请输入 7–15 位数字手机号".to_string());
+            self.input_mode = InputMode::PhoneNumber;
+            if let AuthState::Login { form } = &mut self.auth {
+                form.field = LoginField::PhoneNumber;
+            }
+            return;
+        }
+
+        cancel_request(&mut self.auth_task, &mut self.auth_cancellation);
+        self.auth_generation = self.auth_generation.wrapping_add(1);
+        let generation = self.auth_generation;
+        let cancellation = RequestCancellation::new();
+        self.auth_cancellation = Some(cancellation.clone());
+        if let AuthState::Login { form } = &mut self.auth {
+            form.sending = true;
+            form.status = "正在发送短信验证码…".to_string();
+        }
+        self.status = "正在发送短信验证码…".to_string();
+        let core = Arc::clone(&self.core);
+        let tx = self.tx.clone();
+        self.auth_task = Some(tokio::spawn(async move {
+            let _ = tx
+                .send(Message::CaptchaSent {
+                    generation,
+                    result: core
+                        .send_sms_captcha_cancellable(&phone, "86", &cancellation)
+                        .await,
+                })
+                .await;
+        }));
+    }
+
+    fn submit_sms_login(&mut self) {
+        let (phone, captcha, captcha_sent, busy, failed) = match &self.auth {
+            AuthState::Login { form } => (
+                form.phone.clone(),
+                form.captcha.clone(),
+                form.captcha_sent,
+                form.sending || form.authenticating,
+                is_terminal_sms_login_failure(&form.status),
+            ),
+            _ => return,
+        };
+        if busy || failed {
+            return;
+        }
+        if !captcha_sent {
+            self.request_sms_captcha();
+            return;
+        }
+        if !valid_phone(&phone) {
+            self.set_login_status("请输入 7–15 位数字手机号".to_string());
+            self.set_login_field(LoginField::PhoneNumber);
+            return;
+        }
+        if !valid_captcha(&captcha) {
+            self.set_login_status("请输入 4–8 位短信验证码".to_string());
+            self.set_login_field(LoginField::Captcha);
+            return;
+        }
+
+        cancel_request(&mut self.auth_task, &mut self.auth_cancellation);
+        self.auth_generation = self.auth_generation.wrapping_add(1);
+        let generation = self.auth_generation;
+        let cancellation = RequestCancellation::new();
+        self.auth_cancellation = Some(cancellation.clone());
+        if let AuthState::Login { form } = &mut self.auth {
+            form.authenticating = true;
+            form.status = "正在验证短信验证码…".to_string();
+        }
+        self.status = "正在验证短信验证码…".to_string();
+        let core = Arc::clone(&self.core);
+        let tx = self.tx.clone();
+        self.auth_task = Some(tokio::spawn(async move {
+            let _ = tx
+                .send(Message::SmsLogin {
+                    generation,
+                    result: core
+                        .login_with_sms_cancellable(&phone, &captcha, "86", &cancellation)
+                        .await,
+                })
+                .await;
+        }));
+    }
+
+    fn cancel_phone_login(&mut self) {
+        let request_in_flight = self.auth_task.is_some();
+        cancel_request(&mut self.auth_task, &mut self.auth_cancellation);
+        self.auth_generation = self.auth_generation.wrapping_add(1);
+        let (status, input_mode) = match &mut self.auth {
+            AuthState::Login { form } if request_in_flight => {
+                form.sending = false;
+                form.authenticating = false;
+                form.status = "登录请求已取消".to_string();
+                (form.status.clone(), form.field.input_mode())
+            }
+            AuthState::Login { form } if form.field == LoginField::Captcha => {
+                form.captcha.clear();
+                form.field = LoginField::PhoneNumber;
+                form.status = "已清空验证码，已返回手机号输入".to_string();
+                (form.status.clone(), InputMode::PhoneNumber)
+            }
+            AuthState::Login { form } => {
+                form.phone.clear();
+                form.status = "已清空手机号".to_string();
+                (form.status.clone(), InputMode::PhoneNumber)
+            }
+            _ => return,
+        };
+        self.input_mode = input_mode;
+        self.status = status;
+    }
+
+    fn update_sms_resend_status(&mut self, now: Instant) -> bool {
+        let AuthState::Login { form } = &mut self.auth else {
+            return false;
+        };
+        let Some(available_at) = form.resend_available_at else {
+            return false;
+        };
+        // Preserve a complete server-rejection explanation until the listener
+        // explicitly leaves that failure state. In particular, do not append
+        // a resend countdown and overwrite the compact header status.
+        if is_terminal_sms_login_failure(&form.status) {
+            if now >= available_at {
+                form.resend_available_at = None;
+                return true;
+            }
+            return false;
+        }
+        let next = if now >= available_at {
+            form.resend_available_at = None;
+            "验证码已发送；现在可按 r 重发".to_string()
+        } else {
+            let seconds = available_at.saturating_duration_since(now).as_secs().max(1);
+            let base = form
+                .status
+                .split(" · ")
+                .next()
+                .unwrap_or(form.status.as_str());
+            format!("{base} · {seconds}s 后可重发")
+        };
+        if form.status == next {
+            return false;
+        }
+        form.status = next.clone();
+        self.status = next;
+        true
+    }
+
     fn retry_auth(&mut self) {
         match &self.auth {
             // Never auto-retry a Keychain restore in the same process. macOS
             // may still be showing the first system sheet even when the TUI
-            // has been cancelled; retrying would only create another prompt.
-            AuthState::Failed(_) | AuthState::Restoring => self.begin_qr(),
-            AuthState::Login { .. } => self.begin_qr(),
+            // has been cancelled; this remains an explicit QR-login
+            // escape hatch instead of issuing another credential request.
+            AuthState::Failed(_) | AuthState::Restoring | AuthState::QrLogin { .. } => {
+                self.begin_qr()
+            }
+            AuthState::Login { .. } => self.request_sms_captcha(),
             AuthState::Authenticated(_) => {}
         }
     }
@@ -2279,7 +2807,10 @@ impl App {
     fn refresh(&mut self) {
         if matches!(
             self.auth,
-            AuthState::Login { .. } | AuthState::Failed(_) | AuthState::Restoring
+            AuthState::QrLogin { .. }
+                | AuthState::Login { .. }
+                | AuthState::Failed(_)
+                | AuthState::Restoring
         ) {
             self.retry_auth();
         } else {
@@ -2321,6 +2852,7 @@ impl Drop for App {
         cancel_request(&mut self.cache_task, &mut self.cache_cancellation);
         cancel_request(&mut self.audio_task, &mut self.audio_cancellation);
         cancel_request(&mut self.qr_task, &mut self.qr_cancellation);
+        cancel_request(&mut self.auth_task, &mut self.auth_cancellation);
         self.audio.stop();
     }
 }
@@ -2348,6 +2880,72 @@ fn contains(area: Rect, (x, y): (u16, u16)) -> bool {
         && y < area.y.saturating_add(area.height)
 }
 
+fn valid_phone(value: &str) -> bool {
+    (7..=MAX_PHONE_DIGITS).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_captcha(value: &str) -> bool {
+    (4..=MAX_CAPTCHA_DIGITS).contains(&value.len())
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SmsLoginFailureStatus {
+    /// Kept adjacent to the captcha field. It may contain a deliberate line
+    /// break because the login form reserves two stable rows for feedback.
+    form_status: String,
+    /// The header only has one row, so it carries a short summary instead of
+    /// truncating the actionable field-level explanation.
+    header_status: String,
+}
+
+/// The service uses the same generic "account or password incorrect" response
+/// for several rejected passwordless-login states. Do not present that as a
+/// claim that the listener mistyped a code: it can also mean an expired or
+/// mismatched server-side login challenge.
+fn sms_login_failure_status(error: &CoreError) -> SmsLoginFailureStatus {
+    match error {
+        CoreError::Api(message) if is_network_risk_response(message) => SmsLoginFailureStatus {
+            form_status: "登录失败：网易暂时拒绝此网络请求（网络风险）。\n请稍后再试，或先在官方网易云客户端完成登录。".to_string(),
+            header_status: "登录未完成：网络风险限制".to_string(),
+        },
+        CoreError::Api(message)
+            if message.contains("账号或密码错误") || message.contains("帐号或密码错误") =>
+        {
+            SmsLoginFailureStatus {
+                form_status: "登录失败：服务端拒绝本次登录。\n验证码未必错误；请稍后再试。".to_string(),
+                header_status: "登录未完成：服务端拒绝".to_string(),
+            }
+        }
+        CoreError::Network(_) => SmsLoginFailureStatus {
+            form_status: "登录失败：网络请求未完成。\n请检查连接后稍后再试。".to_string(),
+            header_status: "登录未完成：网络请求失败".to_string(),
+        },
+        _ => SmsLoginFailureStatus {
+            form_status: "登录失败：服务端未完成本次请求。\n请稍后再试。".to_string(),
+            header_status: "登录未完成：服务端请求失败".to_string(),
+        }
+    }
+}
+
+fn is_network_risk_response(message: &str) -> bool {
+    ["网络环境存在风险", "检测到您的网络", "网络风险"]
+        .into_iter()
+        .any(|marker| message.contains(marker))
+}
+
+fn is_terminal_sms_login_failure(status: &str) -> bool {
+    status.starts_with("登录失败：")
+}
+
+fn invalidate_captcha_for_phone_change(form: &mut PhoneLogin) {
+    if form.captcha_sent || !form.captcha.is_empty() || form.resend_available_at.is_some() {
+        form.captcha_sent = false;
+        form.captcha.clear();
+        form.resend_available_at = None;
+    }
+}
+
 pub fn format_time(milliseconds: u64) -> String {
     let seconds = milliseconds / 1_000;
     format!("{}:{:02}", seconds / 60, seconds % 60)
@@ -2361,8 +2959,9 @@ mod tests {
     };
 
     use clarus_core::{
-        Album, Artist, LyricLine, MusicCore, PlaylistDetail, PlaylistPage, PlaylistSummary,
-        PlaylistTrackPage, QrLogin, RequestCancellation, Track, TrackLyrics,
+        Album, Artist, CoreError, LyricLine, MusicCore, PlaylistDetail, PlaylistPage,
+        PlaylistSummary, PlaylistTrackPage, QrLogin, QrLoginCheck, QrLoginStatus,
+        RequestCancellation, SmsLogin, Track, TrackLyrics,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -2372,7 +2971,10 @@ mod tests {
 
     use crate::audio::{AudioSnapshot, NativePlayer};
 
-    use super::{format_time, App, Content, Focus, HitAreas, Message, NavItem};
+    use super::{
+        format_time, sms_login_failure_status, App, Content, Focus, HitAreas, InputMode,
+        LoginField, Message, NavItem, PhoneLogin,
+    };
 
     fn track(id: i64) -> Track {
         Track {
@@ -2400,6 +3002,104 @@ mod tests {
         assert_eq!(NavItem::from_number('1'), Some(NavItem::Daily));
         assert_eq!(NavItem::from_number('4'), Some(NavItem::Created));
         assert_eq!(NavItem::from_number('5'), None);
+    }
+
+    #[test]
+    fn qr_countdown_and_expiry_are_visible_without_continuous_polling() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        let now = Instant::now();
+        app.auth = super::AuthState::QrLogin {
+            qr: Some(QrLogin {
+                key: "key".to_string(),
+                login_url: "https://example.test/qr".to_string(),
+            }),
+            status: "请使用网易云音乐扫描二维码".to_string(),
+            checking: false,
+        };
+        app.next_qr_check = now + Duration::from_secs(60);
+        app.qr_expires_at = Some(now + Duration::from_secs(3));
+
+        assert!(app.tick(now));
+        let super::AuthState::QrLogin { status, .. } = &app.auth else {
+            panic!("expected QR login state");
+        };
+        assert!(status.contains("有效期 3s"));
+
+        app.qr_expires_at = Some(now - Duration::from_millis(1));
+        assert!(app.tick(now));
+        let super::AuthState::QrLogin {
+            status,
+            checking,
+            qr,
+        } = &app.auth
+        else {
+            panic!("expected expired QR login state");
+        };
+        assert!(qr.is_some());
+        assert!(!checking);
+        assert_eq!(status, "二维码已过期，请按 r 或 Enter 重新生成");
+        assert!(app.qr_expires_at.is_none());
+    }
+
+    #[test]
+    fn scanned_qr_explicitly_requests_phone_confirmation() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        app.qr_generation = 4;
+        app.qr_expires_at = Some(Instant::now() + Duration::from_secs(60));
+        app.auth = super::AuthState::QrLogin {
+            qr: Some(QrLogin {
+                key: "key".to_string(),
+                login_url: "https://example.test/qr".to_string(),
+            }),
+            status: "等待扫描二维码".to_string(),
+            checking: true,
+        };
+
+        app.handle_message(Message::QrCheck {
+            generation: 4,
+            result: Ok(QrLoginCheck {
+                status: QrLoginStatus::Scanned,
+                message: "等待确认".to_string(),
+            }),
+        });
+
+        let super::AuthState::QrLogin {
+            status, checking, ..
+        } = &app.auth
+        else {
+            panic!("expected QR login state");
+        };
+        assert_eq!(status, "已扫码，请在网易云音乐 App 中确认登录");
+        assert!(!checking);
+        assert_eq!(app.status, "已扫码，请在网易云音乐 App 中确认登录");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_session_starts_the_qr_flow() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        app.session_generation = 3;
+
+        app.handle_message(Message::Session {
+            generation: 3,
+            result: Ok(clarus_core::AuthSession {
+                authenticated: false,
+                user: None,
+            }),
+        });
+
+        assert!(matches!(
+            app.auth,
+            super::AuthState::QrLogin {
+                qr: None,
+                checking: false,
+                ..
+            }
+        ));
+        assert_eq!(app.input_mode, InputMode::Navigation);
+        assert!(app.qr_task.is_some());
     }
 
     #[test]
@@ -2572,44 +3272,86 @@ mod tests {
     }
 
     #[test]
-    fn qr_countdown_and_expiry_are_visible_without_polling_after_expiration() {
+    fn network_risk_sms_login_error_explains_the_cause_and_recovery() {
+        let failure = sms_login_failure_status(&CoreError::Api(
+            "检测到您的网络环境存在风险，请稍后再试".to_string(),
+        ));
+
+        assert_eq!(failure.header_status, "登录未完成：网络风险限制");
+        assert_eq!(
+            failure.form_status,
+            "登录失败：网易暂时拒绝此网络请求（网络风险）。\n请稍后再试，或先在官方网易云客户端完成登录。"
+        );
+        assert!(!failure.form_status.contains("验证码错误"));
+        assert!(!failure.form_status.contains("重发"));
+    }
+
+    #[test]
+    fn risk_failure_is_not_overwritten_or_retried_by_the_sms_cooldown() {
         let (tx, _rx) = mpsc::channel(4);
         let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
         let now = Instant::now();
-        app.auth = super::AuthState::Login {
-            qr: Some(QrLogin {
-                key: "key".to_string(),
-                login_url: "https://example.test/qr".to_string(),
-            }),
-            status: "请使用网易云音乐扫描二维码".to_string(),
-            checking: false,
-        };
-        app.next_qr_check = now + Duration::from_secs(60);
-        app.qr_expires_at = Some(now + Duration::from_secs(3));
-        assert!(app.tick(now));
-        let super::AuthState::Login { status, .. } = &app.auth else {
-            panic!("expected QR login state");
-        };
-        assert!(status.contains("有效期 3s"));
+        let failure = sms_login_failure_status(&CoreError::Api(
+            "检测到您的网络环境存在风险，请稍后再试".to_string(),
+        ));
+        let expected_form_status = failure.form_status.clone();
+        let expected_header_status = failure.header_status.clone();
+        let mut form = PhoneLogin::new(expected_form_status.clone());
+        form.phone = "13800138000".to_string();
+        form.captcha = "123456".to_string();
+        form.field = LoginField::Captcha;
+        form.captcha_sent = true;
+        form.resend_available_at = Some(now + Duration::from_secs(60));
+        app.auth = super::AuthState::Login { form };
+        app.status = expected_header_status.clone();
 
-        app.qr_expires_at = Some(now - Duration::from_millis(1));
-        assert!(app.tick(now));
-        let super::AuthState::Login {
-            status,
-            checking,
-            qr,
-        } = &app.auth
-        else {
-            panic!("expected expired QR login state");
+        assert!(!app.tick(now + Duration::from_secs(1)));
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.auth_task.is_none());
+        let super::AuthState::Login { form } = &app.auth else {
+            panic!("expected SMS login state");
         };
-        assert!(qr.is_some());
-        assert!(!checking);
-        assert_eq!(status, "二维码已过期，请按 r 重新生成");
-        assert!(app.qr_expires_at.is_none());
+        assert_eq!(form.status, expected_form_status);
+        assert!(form.resend_available_at.is_some());
+        assert_eq!(app.status, expected_header_status);
+
+        assert!(app.tick(now + Duration::from_secs(61)));
+        let super::AuthState::Login { form } = &app.auth else {
+            panic!("expected SMS login state");
+        };
+        assert!(form.resend_available_at.is_none());
+        assert_eq!(form.status, expected_form_status);
+        assert_eq!(app.status, expected_header_status);
+    }
+
+    #[test]
+    fn sms_resend_countdown_updates_and_unlocks_without_a_busy_poll() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        let now = Instant::now();
+        let mut form = PhoneLogin::new("验证码已发送，请输入短信验证码");
+        form.phone = "13800138000".to_string();
+        form.captcha_sent = true;
+        form.field = LoginField::Captcha;
+        form.resend_available_at = Some(now + Duration::from_secs(3));
+        app.auth = super::AuthState::Login { form };
+
+        assert!(app.tick(now));
+        let super::AuthState::Login { form } = &app.auth else {
+            panic!("expected SMS login state");
+        };
+        assert!(form.status.contains("3s 后可重发"));
+
+        assert!(app.tick(now + Duration::from_secs(4)));
+        let super::AuthState::Login { form } = &app.auth else {
+            panic!("expected SMS login state");
+        };
+        assert!(form.resend_available_at.is_none());
+        assert!(form.status.contains("现在可按 r 重发"));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn failed_keychain_restore_can_switch_to_qr_login() {
+    async fn failed_keychain_restore_switches_to_qr_without_a_second_restore() {
         let (tx, _rx) = mpsc::channel(4);
         let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
         app.auth = super::AuthState::Failed("secure storage unavailable".to_string());
@@ -2617,30 +3359,13 @@ mod tests {
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,)));
         assert!(matches!(
             app.auth,
-            super::AuthState::Login {
+            super::AuthState::QrLogin {
                 qr: None,
                 checking: false,
                 ..
             }
         ));
-        assert!(app.qr_task.is_some());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn retry_after_a_failed_keychain_restore_starts_qr_without_another_restore() {
-        let (tx, _rx) = mpsc::channel(4);
-        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
-        app.auth = super::AuthState::Failed("secure storage unavailable".to_string());
-
-        assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE,)));
-        assert!(matches!(
-            app.auth,
-            super::AuthState::Login {
-                qr: None,
-                checking: false,
-                ..
-            }
-        ));
+        assert_eq!(app.input_mode, InputMode::Navigation);
         assert!(app.qr_task.is_some());
         assert!(app.session_task.is_none());
     }
@@ -2662,50 +3387,100 @@ mod tests {
         assert!(cancellation.is_cancelled());
         assert!(app.session_task.is_none());
         assert_eq!(app.session_generation, 10);
-        assert!(matches!(
-            app.auth,
-            super::AuthState::Login {
-                qr: None,
-                checking: false,
-                ..
-            }
-        ));
+        assert!(matches!(app.auth, super::AuthState::QrLogin { .. }));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn esc_during_post_qr_restore_cancels_the_pending_authentication() {
+    async fn phone_form_routes_digits_send_completion_and_login_state() {
         let (tx, _rx) = mpsc::channel(4);
         let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
-        app.qr_generation = 3;
-        app.auth = super::AuthState::Login {
-            qr: Some(QrLogin {
-                key: "key".to_string(),
-                login_url: "https://example.test/qr".to_string(),
-            }),
-            status: "已授权，正在验证…".to_string(),
-            checking: true,
-        };
+        app.begin_phone_login();
+        for digit in "13800138000".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(digit), KeyModifiers::NONE));
+        }
+        let generation = 7;
+        app.auth_generation = generation;
+        if let super::AuthState::Login { form } = &mut app.auth {
+            assert_eq!(form.phone, "13800138000");
+            form.sending = true;
+        }
 
-        app.handle_message(Message::QrCheck {
-            generation: 3,
-            result: Ok(clarus_core::QrLoginCheck {
-                status: clarus_core::QrLoginStatus::Authorized,
-                message: "登录成功".to_string(),
+        app.handle_message(Message::CaptchaSent {
+            generation,
+            result: Ok(()),
+        });
+        let super::AuthState::Login { form } = &app.auth else {
+            panic!("expected SMS login state");
+        };
+        assert!(form.captcha_sent);
+        assert_eq!(form.field, LoginField::Captcha);
+        assert_eq!(app.input_mode, InputMode::Captcha);
+
+        assert!(app.handle_paste("123456"));
+        let super::AuthState::Login { form } = &app.auth else {
+            panic!("expected SMS login state");
+        };
+        assert_eq!(form.captcha, "123456");
+        app.auth_generation = app.auth_generation.wrapping_add(1);
+        let login_generation = app.auth_generation;
+        app.handle_message(Message::SmsLogin {
+            generation: login_generation,
+            result: Ok(SmsLogin {
+                user: clarus_core::AuthUser {
+                    user_id: 7,
+                    nickname: "listener".to_string(),
+                    vip_type: 0,
+                },
+                saved_to_keychain: false,
             }),
         });
+        assert!(matches!(app.auth, super::AuthState::Authenticated(_)));
+        assert_eq!(app.input_mode, InputMode::Navigation);
+        assert!(app.status.contains("未能保存"));
+    }
 
-        assert!(matches!(app.auth, super::AuthState::Restoring));
-        assert!(app.session_task.is_some());
-        assert!(!app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        assert!(app.session_task.is_none());
-        assert!(matches!(
-            app.auth,
-            super::AuthState::Login {
-                qr: None,
-                checking: false,
-                ..
-            }
-        ));
+    #[test]
+    fn changing_the_phone_invalidates_the_old_captcha_and_resend_cooldown() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        let mut form = PhoneLogin::new("输入手机号后按 Enter 发送验证码");
+        form.phone = "13800138000".to_string();
+        form.captcha = "123456".to_string();
+        form.captcha_sent = true;
+        form.resend_available_at = Some(Instant::now() + Duration::from_secs(60));
+        app.auth = super::AuthState::Login { form };
+        app.input_mode = InputMode::PhoneNumber;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+
+        let super::AuthState::Login { form } = &app.auth else {
+            panic!("expected SMS login state");
+        };
+        assert!(!form.captcha_sent);
+        assert!(form.captcha.is_empty());
+        assert!(form.resend_available_at.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn esc_cancels_an_inflight_sms_operation() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        app.begin_phone_login();
+        let cancellation = RequestCancellation::new();
+        app.auth_cancellation = Some(cancellation.clone());
+        app.auth_task = Some(tokio::spawn(async {
+            std::future::pending::<()>().await;
+        }));
+        if let super::AuthState::Login { form } = &mut app.auth {
+            form.authenticating = true;
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(cancellation.is_cancelled());
+        assert!(app.auth_task.is_none());
+        assert!(matches!(app.auth, super::AuthState::Login { .. }));
+        assert_eq!(app.status, "登录请求已取消");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3043,14 +3818,8 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        assert!(matches!(
-            app.auth,
-            super::AuthState::Login {
-                qr: None,
-                checking: false,
-                ..
-            }
-        ));
+        assert!(matches!(app.auth, super::AuthState::QrLogin { .. }));
+        assert_eq!(app.input_mode, InputMode::Navigation);
         assert!(app.qr_task.is_some());
     }
 
@@ -3083,14 +3852,8 @@ mod tests {
             Some("authentication required: session expired")
         );
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(
-            app.auth,
-            super::AuthState::Login {
-                qr: None,
-                checking: false,
-                ..
-            }
-        ));
+        assert!(matches!(app.auth, super::AuthState::QrLogin { .. }));
+        assert_eq!(app.input_mode, InputMode::Navigation);
         assert!(app.qr_task.is_some());
     }
 

@@ -1,6 +1,10 @@
 import { computed, markRaw, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { defineStore } from 'pinia'
-import { NativeCatalogGateway } from '@/features/catalog/infrastructure/native-catalog'
+import {
+  configureCatalogRuntime,
+  NativeCatalogGateway,
+} from '@/features/catalog/infrastructure/native-catalog'
+import type { PerformanceAudioFixture } from '@/performance/runtime-config'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
 import type { MusicQuality } from '@/features/settings/domain/settings'
 import { preloadCoverImages } from '@/platform/cover-image'
@@ -10,6 +14,7 @@ import {
   type AudioEngine,
   type AudioEngineState,
   type AudioSource,
+  type AudioSourceProvenance,
 } from '../domain/audio-engine'
 import {
   createShuffledOrder,
@@ -46,6 +51,39 @@ interface StreamGateway {
 
 type MediaSessionFactory = (transport: MediaSessionTransport) => PlayerMediaSession
 
+export type PlayerRuntimeMode = 'normal' | 'performance'
+export type PlayerRuntimeConfig =
+  | Readonly<{ mode: 'normal' }>
+  | Readonly<{ mode: 'performance'; audioFixture: PerformanceAudioFixture }>
+
+let playerRuntimeMode: PlayerRuntimeMode = 'normal'
+
+// The automated performance scenario must exercise the same player instance as
+// the UI.  It still must not read or overwrite the user's queue, or make like
+// mutations against their account while it plays fixture tracks.
+const performanceTrackLikeGateway: TrackLikeGateway = {
+  check: async () => false,
+  setLiked: async (_trackId, liked) => liked,
+}
+
+/**
+ * Select dependencies for the app-wide `player` store before its first use.
+ * The normal runtime remains the default for production and regular tests.
+ */
+export function configurePlayerRuntime(config: PlayerRuntimeConfig): void
+export function configurePlayerRuntime(mode: PlayerRuntimeMode): void
+export function configurePlayerRuntime(
+  configOrMode: PlayerRuntimeConfig | PlayerRuntimeMode,
+): void {
+  if (typeof configOrMode === 'string') {
+    playerRuntimeMode = configOrMode
+    if (configOrMode === 'normal') configureCatalogRuntime({ mode: 'normal' })
+    return
+  }
+  playerRuntimeMode = configOrMode.mode
+  configureCatalogRuntime(configOrMode)
+}
+
 /**
  * A page-owned playlist can give the player a lightweight continuation instead
  * of eagerly materializing every track in a long collection.  The store asks
@@ -72,7 +110,9 @@ const QUEUE_PREFETCH_AHEAD = 12
 const MAX_EMPTY_QUEUE_CONTINUATION_PAGES = 3
 
 function defaultQueuePersistence(storeId: string): PlayerQueuePersistence {
-  if (storeId !== 'player') return noPlayerQueuePersistence
+  if (storeId !== 'player' || playerRuntimeMode === 'performance') {
+    return noPlayerQueuePersistence
+  }
   try {
     if (typeof globalThis.localStorage !== 'undefined') {
       return createLocalPlayerQueuePersistence(globalThis.localStorage)
@@ -81,6 +121,13 @@ function defaultQueuePersistence(storeId: string): PlayerQueuePersistence {
     // Local storage can be disabled by the WebView policy.
   }
   return noPlayerQueuePersistence
+}
+
+function defaultLikeGateway(storeId: string): TrackLikeGateway {
+  if (storeId === 'player' && playerRuntimeMode === 'performance') {
+    return performanceTrackLikeGateway
+  }
+  return nativeTrackLikeGateway
 }
 
 function createEngine(): AudioEngine {
@@ -97,17 +144,22 @@ function asError(reason: unknown): Error {
 
 export function createPlayerStore(
   engineFactory: () => AudioEngine = createEngine,
-  streamGateway: StreamGateway = new NativeCatalogGateway(),
+  streamGateway?: StreamGateway,
   random: () => number = Math.random,
   storeId = 'player',
   mediaSessionFactory: MediaSessionFactory = createBrowserMediaSession,
-  likeGateway: TrackLikeGateway = nativeTrackLikeGateway,
+  likeGateway?: TrackLikeGateway,
   queuePersistence?: PlayerQueuePersistence,
 ) {
   return defineStore(storeId, () => {
     const engine = markRaw(engineFactory())
+    // Resolve the default gateway when the Pinia store is created, not when
+    // this module is imported. Main configures performance runtime before
+    // mounting, while normal callers retain the same native gateway behavior.
+    const resolvedStreamGateway = streamGateway ?? new NativeCatalogGateway()
     const settingsStore = useSettingsStore()
     const persistence = queuePersistence ?? defaultQueuePersistence(storeId)
+    const trackLikeGateway = likeGateway ?? defaultLikeGateway(storeId)
     let persistenceAvailable = true
     let loadedSnapshot: PlayerQueueSnapshot | null = null
     try {
@@ -145,6 +197,9 @@ export function createPlayerStore(
     const reversed = ref(false)
     const error = shallowRef<Error | null>(null)
     const liked = ref<boolean | null>(null)
+    const sourceKind = ref<AudioSource['kind'] | 'none'>('none')
+    const sourceUrl = ref<string | null>(null)
+    const sourceProvenance = ref<AudioSourceProvenance | null>(null)
     const likeBusy = ref(false)
     const activeLoad = shallowRef<AbortController | null>(null)
     const queueBusy = ref(false)
@@ -191,7 +246,7 @@ export function createPlayerStore(
       const controller = new AbortController()
       likeController = controller
       likeBusy.value = true
-      void likeGateway
+      void trackLikeGateway
         .check(track.id, controller.signal)
         .then((value) => {
           if (
@@ -334,6 +389,9 @@ export function createPlayerStore(
       const controller = new AbortController()
       activeLoad.value = controller
       error.value = null
+      sourceKind.value = 'none'
+      sourceUrl.value = null
+      sourceProvenance.value = null
       const forwardAbort = () => controller.abort(signal?.reason)
       signal?.addEventListener('abort', forwardAbort, { once: true })
       if (signal?.aborted) forwardAbort()
@@ -352,6 +410,9 @@ export function createPlayerStore(
         sourceTransferred = true
         if (activeLoad.value !== controller) return
         currentTrack.value = track
+        sourceKind.value = source.kind
+        sourceUrl.value = source.url
+        sourceProvenance.value = source.kind === 'remote' ? (source.provenance ?? null) : null
         restoredTrackPending = false
         restoredProgress = 0
         refreshLikeState(track)
@@ -571,7 +632,7 @@ export function createPlayerStore(
       pendingTrack.value = track
       error.value = null
       try {
-        const source = await streamGateway.resolveStream(
+        const source = await resolvedStreamGateway.resolveStream(
           track.id,
           settingsStore.settings.musicQuality,
           controller.signal,
@@ -719,7 +780,7 @@ export function createPlayerStore(
         pendingTrack.value = track
         error.value = null
         try {
-          const source = await streamGateway.resolveStream(
+          const source = await resolvedStreamGateway.resolveStream(
             track.id,
             settingsStore.settings.musicQuality,
             controller.signal,
@@ -787,12 +848,12 @@ export function createPlayerStore(
       let rollbackState = liked.value
       try {
         const currentLiked =
-          liked.value ?? (await likeGateway.check(track.id, controller.signal))
+          liked.value ?? (await trackLikeGateway.check(track.id, controller.signal))
         if (currentTrack.value?.id !== track.id || likeController !== controller) return false
         rollbackState = currentLiked
         likeStateVersion += 1
         liked.value = !currentLiked
-        const nextLiked = await likeGateway.setLiked(
+        const nextLiked = await trackLikeGateway.setLiked(
           track.id,
           !currentLiked,
           controller.signal,
@@ -925,6 +986,9 @@ export function createPlayerStore(
       for (const unsubscribe of unsubscribers) unsubscribe()
       mediaSession.dispose()
       engine.dispose()
+      sourceKind.value = 'none'
+      sourceUrl.value = null
+      sourceProvenance.value = null
     }
 
     onScopeDispose(dispose)
@@ -947,6 +1011,9 @@ export function createPlayerStore(
       error,
       seeking,
       liked,
+      sourceKind,
+      sourceUrl,
+      sourceProvenance,
       likeBusy,
       playing,
       enabled,

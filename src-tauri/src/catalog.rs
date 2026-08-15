@@ -7,6 +7,7 @@ use tauri::State;
 
 use crate::{
     music_api::{with_request_context, ApiFailure, MusicApiState},
+    performance::PerformanceState,
     unblock::{UnblockMusicState, UnblockResolver, UnblockTrack, UnblockedSource},
 };
 
@@ -74,6 +75,28 @@ pub(crate) enum CatalogItem {
         artist_name: String,
         duration_ms: u64,
     },
+}
+
+pub(crate) fn performance_fixture_track(id: i64, artist_id: i64, cover_url: String) -> CatalogItem {
+    CatalogItem::Track {
+        id,
+        name: format!("Performance Track {id}"),
+        duration_ms: 300_000,
+        artists: vec![CatalogArtist {
+            id: artist_id,
+            name: format!("Performance Artist {artist_id}"),
+        }],
+        album: CatalogAlbum {
+            id: id.saturating_add(10_000),
+            name: "Performance Album".to_string(),
+            cover_url,
+        },
+        aliases: Vec::new(),
+        translated_names: Vec::new(),
+        explicit: false,
+        playable: true,
+        unavailable_reason: None,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -769,12 +792,23 @@ pub async fn resolve_stream_url(
     quality: String,
     state: State<'_, MusicApiState>,
     unblock_state: State<'_, UnblockMusicState>,
+    performance_state: State<'_, PerformanceState>,
 ) -> Result<StreamSource, ApiFailure> {
     if track_id <= 0 {
         return Err(ApiFailure::invalid("trackId must be a positive integer"));
     }
     let level = quality_level(&quality)
         .ok_or_else(|| ApiFailure::invalid("quality is not a supported music quality"))?;
+    if let Some((url, mime_type, size_bytes)) = performance_state.audio_fixture() {
+        return Ok(StreamSource {
+            url,
+            mime_type,
+            bitrate: 320_000,
+            size_bytes,
+            duration_ms: 300_000,
+            level: level.to_string(),
+        });
+    }
     let (client, cookie, real_ip) = state.request_context().await;
     let resolver = unblock_state.resolver();
     state

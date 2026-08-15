@@ -10,10 +10,11 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{
-    app::{format_time, App, AuthState, Content, Focus, HitAreas, NavItem},
-    qr::{QrRenderMode, TerminalQr},
+use crate::app::{
+    format_time, App, AuthState, Content, Focus, HitAreas, LoginField, NavItem, PhoneLogin,
 };
+use crate::qr::{QrRenderMode, TerminalQr};
+use crate::theme::{Rgb, TerminalColors, Theme};
 
 const BACKGROUND: Color = Color::Black;
 const FOREGROUND: Color = Color::White;
@@ -76,11 +77,22 @@ fn locale_supports_unicode(locale: Option<&std::ffi::OsStr>) -> bool {
         && !normalized.starts_with("c.")
 }
 
+#[cfg(test)]
 pub fn render(frame: &mut Frame, app: &mut App, capabilities: Capabilities) {
+    render_with_theme(frame, app, capabilities, Theme::clarus_black());
+}
+
+pub fn render_with_theme(
+    frame: &mut Frame,
+    app: &mut App,
+    capabilities: Capabilities,
+    theme: Theme,
+) {
     let area = frame.area();
     // A terminal cell that no widget touches keeps ratatui's `Reset` style.
-    // Paint the complete frame first so the black/white visual system also
-    // applies to intentional empty space around compact layouts.
+    // Paint the complete frame first; terminal-native colors are substituted
+    // only after all widgets have rendered, so layout code never needs to
+    // branch on a palette.
     frame.buffer_mut().set_style(area, base_style());
     // A previous narrow render may have put the content list into a
     // lyrics-only presentation. Reset it before handling another screen so
@@ -91,6 +103,7 @@ pub fn render(frame: &mut Frame, app: &mut App, capabilities: Capabilities) {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         render_too_small(frame, area);
         normalize_frame_style(frame, area);
+        apply_terminal_theme(frame, area, theme, capabilities);
         return;
     }
 
@@ -99,6 +112,7 @@ pub fn render(frame: &mut Frame, app: &mut App, capabilities: Capabilities) {
         _ => render_login(frame, app, area, capabilities),
     }
     normalize_frame_style(frame, area);
+    apply_terminal_theme(frame, area, theme, capabilities);
 }
 
 fn normalize_frame_style(frame: &mut Frame, area: Rect) {
@@ -106,7 +120,7 @@ fn normalize_frame_style(frame: &mut Frame, area: Rect) {
     // CJK character) to keep the cell available for the next render. That
     // continuation cell also loses its style, so inherit the preceding wide
     // cell's style before restoring the explicit monochrome defaults. This
-    // keeps reverse-video selection and the QR quiet zone visually contiguous.
+    // keeps reverse-video selection and the login form visually contiguous.
     let buffer = frame.buffer_mut();
     for y in area.top()..area.bottom() {
         let mut continuation_style = None;
@@ -145,6 +159,204 @@ fn normalize_frame_style(frame: &mut Frame, area: Rect) {
     }
 }
 
+/// Converts Clarus's internal monochrome palette into a terminal-native
+/// presentation after layout has completed. There is deliberately no painted
+/// background in this mode: `Reset` leaves both foreground and background to
+/// the terminal profile, while reverse video gives selection a visible focus
+/// treatment on either light or dark themes.
+fn apply_terminal_theme(frame: &mut Frame, area: Rect, theme: Theme, capabilities: Capabilities) {
+    if theme.is_clarus_black() {
+        return;
+    }
+    let palette = TerminalPalette::new(theme.terminal_defaults(), capabilities.true_color);
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            if cell.fg == BACKGROUND && cell.bg == FOREGROUND {
+                cell.fg = Color::Reset;
+                cell.bg = Color::Reset;
+                cell.modifier.insert(Modifier::REVERSED);
+                continue;
+            }
+            cell.fg = terminal_foreground_color(cell.fg, palette);
+            cell.bg = terminal_background_color(cell.bg);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerminalPalette {
+    defaults: Option<TerminalColors>,
+    muted: Color,
+    warning: Color,
+    error: Color,
+}
+
+impl TerminalPalette {
+    fn new(defaults: Option<TerminalColors>, true_color: bool) -> Self {
+        let defaults = true_color.then_some(defaults).flatten();
+        Self {
+            defaults,
+            muted: terminal_muted_color(defaults),
+            warning: terminal_status_color(defaults, StatusTone::Warning),
+            error: terminal_status_color(defaults, StatusTone::Error),
+        }
+    }
+}
+
+fn terminal_foreground_color(color: Color, palette: TerminalPalette) -> Color {
+    match color {
+        BACKGROUND | FOREGROUND => Color::Reset,
+        MUTED => palette.muted,
+        Color::Rgb(red, green, blue) if red == green && green == blue => {
+            terminal_neutral_color(palette.defaults, red)
+        }
+        WARNING => palette.warning,
+        ERROR => palette.error,
+        color => color,
+    }
+}
+
+fn terminal_background_color(color: Color) -> Color {
+    match color {
+        BACKGROUND | FOREGROUND => Color::Reset,
+        color => color,
+    }
+}
+
+fn terminal_muted_color(defaults: Option<TerminalColors>) -> Color {
+    let Some(defaults) = defaults else {
+        return MUTED;
+    };
+    rgb_color(tone_with_minimum_contrast(defaults, 0.45, 3.0))
+}
+
+fn terminal_neutral_color(defaults: Option<TerminalColors>, level: u8) -> Color {
+    let Some(defaults) = defaults else {
+        // With no measured foreground/background pair, a literal grayscale
+        // could be invisible on either a light or dark terminal. Keep only a
+        // two-step hierarchy until the next state change instead.
+        return if level >= 128 { Color::Reset } else { MUTED };
+    };
+    rgb_color(blend(
+        defaults.background,
+        defaults.foreground,
+        level as f32 / 255.0,
+    ))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StatusTone {
+    Warning,
+    Error,
+}
+
+fn terminal_status_color(defaults: Option<TerminalColors>, tone: StatusTone) -> Color {
+    let Some(defaults) = defaults else {
+        return match tone {
+            StatusTone::Warning => WARNING,
+            StatusTone::Error => ERROR,
+        };
+    };
+    let (dark, light) = match tone {
+        // Both candidates stay recognizably semantic, while choosing by
+        // contrast avoids unreadable ANSI-yellow text on a light terminal.
+        StatusTone::Warning => (
+            Rgb {
+                red: 116,
+                green: 76,
+                blue: 0,
+            },
+            Rgb {
+                red: 255,
+                green: 211,
+                blue: 92,
+            },
+        ),
+        StatusTone::Error => (
+            Rgb {
+                red: 181,
+                green: 35,
+                blue: 35,
+            },
+            Rgb {
+                red: 255,
+                green: 111,
+                blue: 111,
+            },
+        ),
+    };
+    let color = if contrast_ratio(dark, defaults.background)
+        >= contrast_ratio(light, defaults.background)
+    {
+        dark
+    } else {
+        light
+    };
+    rgb_color(color)
+}
+
+fn tone_with_minimum_contrast(
+    defaults: TerminalColors,
+    desired_amount: f32,
+    minimum_contrast: f32,
+) -> Rgb {
+    let desired = blend(defaults.background, defaults.foreground, desired_amount);
+    if contrast_ratio(desired, defaults.background) >= minimum_contrast {
+        return desired;
+    }
+
+    let mut lower = desired_amount;
+    let mut upper = 1.0_f32;
+    for _ in 0..10 {
+        let middle = (lower + upper) / 2.0;
+        let candidate = blend(defaults.background, defaults.foreground, middle);
+        if contrast_ratio(candidate, defaults.background) >= minimum_contrast {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    blend(defaults.background, defaults.foreground, upper)
+}
+
+fn blend(background: Rgb, foreground: Rgb, amount: f32) -> Rgb {
+    let amount = amount.clamp(0.0, 1.0);
+    let channel = |background: u8, foreground: u8| {
+        (background as f32 + (foreground as f32 - background as f32) * amount).round() as u8
+    };
+    Rgb {
+        red: channel(background.red, foreground.red),
+        green: channel(background.green, foreground.green),
+        blue: channel(background.blue, foreground.blue),
+    }
+}
+
+fn rgb_color(color: Rgb) -> Color {
+    Color::Rgb(color.red, color.green, color.blue)
+}
+
+fn contrast_ratio(left: Rgb, right: Rgb) -> f32 {
+    let luminance = |color: Rgb| {
+        let channel = |value: u8| {
+            let value = value as f32 / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.red) + 0.7152 * channel(color.green) + 0.0722 * channel(color.blue)
+    };
+    let (lighter, darker) = if luminance(left) >= luminance(right) {
+        (luminance(left), luminance(right))
+    } else {
+        (luminance(right), luminance(left))
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
 fn render_too_small(frame: &mut Frame, area: Rect) {
     let message = format!(
         "终端至少需要 {MIN_WIDTH}×{MIN_HEIGHT}（当前 {}×{}）",
@@ -160,36 +372,133 @@ fn render_too_small(frame: &mut Frame, area: Rect) {
 }
 
 fn render_login(frame: &mut Frame, app: &mut App, area: Rect, capabilities: Capabilities) {
-    let sections = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
-    render_header(frame, sections[0], "登录", None, &app.status);
-
-    let (qr_url, qr_status) = match &app.auth {
-        AuthState::Login {
-            qr: Some(qr),
+    match &app.auth {
+        AuthState::QrLogin {
+            qr,
             status,
-            ..
-        } => (Some(qr.login_url.as_str()), status.as_str()),
-        AuthState::Login { status, .. } => (None, status.as_str()),
-        AuthState::Restoring => (None, "正在从系统 Keychain 恢复登录态…"),
-        AuthState::Failed(message) => (None, message.as_str()),
-        AuthState::Authenticated(_) => return,
-    };
+            checking,
+        } => render_qr_login(frame, area, qr.as_ref(), status, *checking, capabilities),
+        AuthState::Restoring => {
+            let sections =
+                Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
+            render_header(frame, sections[0], "登录", None, &app.status);
+            render_login_notice(
+                frame,
+                sections[1],
+                "正在恢复登录状态",
+                "正在读取 TUI 专用 Keychain 中已保存的会话。",
+                "r / Enter / Esc 使用二维码登录    Ctrl+X 退出",
+                WARNING,
+            );
+        }
+        AuthState::Failed(message) => {
+            let sections =
+                Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
+            render_header(frame, sections[0], "登录", None, &app.status);
+            render_login_notice(
+                frame,
+                sections[1],
+                "无法恢复登录状态",
+                message,
+                "r / Enter / Esc 使用二维码登录    Ctrl+X 退出",
+                ERROR,
+            );
+        }
+        // SMS state is intentionally retained only for internal compatibility.
+        // It has no public startup flag or input path, so even an unexpected
+        // internal transition never exposes a second login method.
+        AuthState::Login { .. } => {
+            let sections =
+                Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
+            render_header(frame, sections[0], "登录", None, &app.status);
+            render_login_notice(
+                frame,
+                sections[1],
+                "二维码登录",
+                "正在准备二维码登录。",
+                "r / Enter 生成二维码    Ctrl+X 退出",
+                WARNING,
+            );
+        }
+        AuthState::Authenticated(_) => {}
+    }
+}
 
+fn render_qr_login(
+    frame: &mut Frame,
+    area: Rect,
+    qr_login: Option<&clarus_core::QrLogin>,
+    status: &str,
+    checking: bool,
+    capabilities: Capabilities,
+) {
+    let encoded = qr_login
+        .map(|qr| TerminalQr::encode(&qr.login_url))
+        .transpose();
+    let compact_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+    let compact_mode = encoded
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .and_then(|qr| qr_render_mode(qr, compact_area, capabilities));
+    if let (Ok(Some(qr)), Some(mode)) = (encoded.as_ref().map(Option::as_ref), compact_mode) {
+        // A normal QR key needs roughly 45×23 cells in its compact half-block
+        // form. At 80×24, give it virtually the whole screen instead of
+        // shrinking modules or sacrificing the required quiet zone.
+        if area.height <= 25 {
+            render_qr_code(frame, compact_area, qr, mode);
+            let compact_status = if checking {
+                "正在检查扫码状态…"
+            } else {
+                status
+            };
+            frame.render_widget(
+                Paragraph::new(truncate_display(
+                    compact_status,
+                    area.width.saturating_sub(2) as usize,
+                ))
+                .style(
+                    Style::default()
+                        .fg(status_color(compact_status))
+                        .bg(BACKGROUND),
+                )
+                .alignment(Alignment::Center),
+                Rect {
+                    x: area.x,
+                    y: area.bottom().saturating_sub(1),
+                    width: area.width,
+                    height: 1,
+                },
+            );
+            return;
+        }
+    }
+
+    let sections = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
+    render_header(frame, sections[0], "登录", None, status);
     let panel = sections[1];
-    let headline = if qr_status.contains("二维码已过期") {
-        "二维码已过期，请按 r 重新生成"
-    } else if qr_url.is_some() {
-        "使用网易云音乐扫描二维码"
-    } else if matches!(app.auth, AuthState::Failed(_)) {
-        "无法恢复登录状态"
-    } else {
-        "正在准备登录"
+    let (headline, qr, failure) = match encoded {
+        Ok(Some(qr)) if status.contains("二维码已过期") => {
+            ("二维码已过期，请按 r 或 Enter 重新生成", Some(qr), false)
+        }
+        Ok(Some(qr)) if checking => ("正在检查扫码状态…", Some(qr), false),
+        Ok(Some(qr)) if status.starts_with("已扫码") => {
+            ("已扫码，请在网易云音乐 App 中确认登录", Some(qr), false)
+        }
+        Ok(Some(qr)) => ("使用网易云音乐扫描二维码", Some(qr), false),
+        Ok(None) => ("正在准备二维码登录", None, false),
+        Err(_) => ("二维码编码失败；按 r 或 Enter 重试", None, true),
     };
     frame.render_widget(
         Paragraph::new(headline)
             .style(
                 Style::default()
-                    .fg(FOREGROUND)
+                    .fg(if failure { ERROR } else { FOREGROUND })
                     .bg(BACKGROUND)
                     .add_modifier(Modifier::BOLD),
             )
@@ -201,18 +510,32 @@ fn render_login(frame: &mut Frame, app: &mut App, area: Rect, capabilities: Capa
             height: 1,
         },
     );
-
-    if let Some(url) = qr_url {
-        render_qr(frame, panel, url, capabilities);
+    let qr_area = Rect {
+        x: panel.x,
+        y: panel.y.saturating_add(3),
+        width: panel.width,
+        height: panel.height.saturating_sub(7),
+    };
+    if let Some(qr) = qr {
+        if let Some(mode) = qr_render_mode(&qr, qr_area, capabilities) {
+            render_qr_code(frame, qr_area, &qr, mode);
+        } else {
+            frame.render_widget(
+                Paragraph::new("终端太窄，无法安全显示二维码；请放大窗口后按 r 重试")
+                    .style(Style::default().fg(WARNING).bg(BACKGROUND))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true }),
+                centered(qr_area, qr_area.width.saturating_sub(4), 3),
+            );
+        }
     }
-
     let help_y = panel.bottom().saturating_sub(3);
     frame.render_widget(
         Paragraph::new(truncate_display(
-            qr_status,
+            status,
             panel.width.saturating_sub(4) as usize,
         ))
-        .style(Style::default().fg(status_color(qr_status)).bg(BACKGROUND))
+        .style(Style::default().fg(status_color(status)).bg(BACKGROUND))
         .alignment(Alignment::Center),
         Rect {
             x: panel.x.saturating_add(2),
@@ -221,19 +544,10 @@ fn render_login(frame: &mut Frame, app: &mut App, area: Rect, capabilities: Capa
             height: 1,
         },
     );
-    let login_help = match &app.auth {
-        AuthState::Restoring => "r / Enter / Esc 改用二维码    Ctrl+X 退出",
-        AuthState::Failed(_) => "r / Enter / Esc 使用二维码登录    Ctrl+X 退出",
-        AuthState::Login { .. } => "r / Enter 重新生成二维码    Esc 取消    Ctrl+X 退出",
-        AuthState::Authenticated(_) => "Ctrl+X 退出",
-    };
     frame.render_widget(
-        Paragraph::new(truncate_display(
-            login_help,
-            panel.width.saturating_sub(2) as usize,
-        ))
-        .style(Style::default().fg(MUTED).bg(BACKGROUND))
-        .alignment(Alignment::Center),
+        Paragraph::new("r / Enter 重新生成二维码    Esc 取消    Ctrl+X 退出")
+            .style(Style::default().fg(MUTED).bg(BACKGROUND))
+            .alignment(Alignment::Center),
         Rect {
             x: panel.x,
             y: help_y.saturating_add(1),
@@ -243,65 +557,272 @@ fn render_login(frame: &mut Frame, app: &mut App, area: Rect, capabilities: Capa
     );
 }
 
-fn render_qr(frame: &mut Frame, panel: Rect, url: &str, capabilities: Capabilities) {
-    let Ok(qr) = TerminalQr::encode(url) else {
-        frame.render_widget(
-            Paragraph::new("二维码编码失败；按 r 重试")
-                .style(Style::default().fg(ERROR).bg(BACKGROUND))
-                .alignment(Alignment::Center),
-            centered(panel, panel.width.saturating_sub(4), 1),
-        );
-        return;
-    };
-    let available_width = panel.width.saturating_sub(4);
-    let available_height = panel.height.saturating_sub(7);
-    let mode = if capabilities.unicode
-        && qr.double_width_cells() <= available_width
-        && qr.double_width_rows() <= available_height
+fn qr_render_mode(qr: &TerminalQr, area: Rect, capabilities: Capabilities) -> Option<QrRenderMode> {
+    if capabilities.unicode
+        && qr.half_block_cells() <= area.width
+        && qr.half_block_rows() <= area.height
     {
-        QrRenderMode::DoubleWidth
-    } else if capabilities.unicode
-        && qr.half_block_cells() <= available_width
-        && qr.half_block_rows() <= available_height
-    {
-        QrRenderMode::HalfBlock
+        // Half blocks are deliberately preferred to the larger double-width
+        // form: the scanner still sees square-ish modules, while the QR fits
+        // ordinary terminal windows instead of dominating the entire screen.
+        Some(QrRenderMode::HalfBlock)
     } else if !capabilities.unicode
-        && qr.double_width_cells() <= available_width
-        && qr.double_width_rows() <= available_height
+        && qr.double_width_cells() <= area.width
+        && qr.double_width_rows() <= area.height
     {
-        QrRenderMode::Ascii
+        Some(QrRenderMode::Ascii)
     } else {
-        frame.render_widget(
-            Paragraph::new("终端太窄，无法安全显示二维码；请放大窗口后按 r 重试")
-                .style(Style::default().fg(WARNING).bg(BACKGROUND))
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true }),
-            centered(panel, available_width, 3),
-        );
-        return;
-    };
-    let lines = qr.lines(mode);
+        None
+    }
+}
+
+fn render_qr_code(frame: &mut Frame, area: Rect, qr: &TerminalQr, mode: QrRenderMode) {
     let (width, height) = match mode {
-        QrRenderMode::DoubleWidth => (qr.double_width_cells(), qr.double_width_rows()),
+        QrRenderMode::DoubleWidth | QrRenderMode::Ascii => {
+            (qr.double_width_cells(), qr.double_width_rows())
+        }
         QrRenderMode::HalfBlock => (qr.half_block_cells(), qr.half_block_rows()),
-        QrRenderMode::Ascii => (qr.double_width_cells(), qr.double_width_rows()),
     };
-    let qr_area = centered(
+    frame.render_widget(
+        Paragraph::new(qr.lines(mode)).alignment(Alignment::Center),
+        centered(area, width, height),
+    );
+}
+
+fn render_login_notice(
+    frame: &mut Frame,
+    panel: Rect,
+    headline: &str,
+    message: &str,
+    help: &str,
+    color: Color,
+) {
+    let content = centered(panel, panel.width.saturating_sub(8), 7);
+    frame.render_widget(
+        Paragraph::new(headline)
+            .style(
+                Style::default()
+                    .fg(FOREGROUND)
+                    .bg(BACKGROUND)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Center),
         Rect {
-            x: panel.x,
-            y: panel.y.saturating_add(3),
-            width: panel.width,
-            height: panel.height.saturating_sub(7),
+            x: content.x,
+            y: content.y,
+            width: content.width,
+            height: 1,
         },
-        width,
-        height,
     );
     frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(Color::White))
-            .alignment(Alignment::Center),
-        qr_area,
+        Paragraph::new(sanitize_multiline(message))
+            .style(Style::default().fg(color).bg(BACKGROUND))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        Rect {
+            x: content.x,
+            y: content.y.saturating_add(2),
+            width: content.width,
+            height: 2,
+        },
     );
+    frame.render_widget(
+        Paragraph::new(help)
+            .style(Style::default().fg(MUTED).bg(BACKGROUND))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        Rect {
+            x: content.x,
+            y: content.bottom().saturating_sub(1),
+            width: content.width,
+            height: 1,
+        },
+    );
+}
+
+#[allow(dead_code)] // Kept with the retained SMS state, but never routed by the UI.
+fn render_phone_login(
+    frame: &mut Frame,
+    panel: Rect,
+    form: &PhoneLogin,
+    capabilities: Capabilities,
+) {
+    let form_area = centered(panel, panel.width.min(58), panel.height.min(10));
+    frame.render_widget(
+        Paragraph::new("手机验证码登录")
+            .style(
+                Style::default()
+                    .fg(FOREGROUND)
+                    .bg(BACKGROUND)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Center),
+        Rect {
+            x: form_area.x,
+            y: form_area.y,
+            width: form_area.width,
+            height: 1,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new("仅支持 +86 中国大陆手机号")
+            .style(Style::default().fg(MUTED).bg(BACKGROUND))
+            .alignment(Alignment::Center),
+        Rect {
+            x: form_area.x,
+            y: form_area.y.saturating_add(1),
+            width: form_area.width,
+            height: 1,
+        },
+    );
+
+    let fields = Rect {
+        x: form_area.x.saturating_add(2),
+        y: form_area.y.saturating_add(3),
+        width: form_area.width.saturating_sub(4),
+        height: 3,
+    };
+    let phone_value = if form.phone.is_empty() {
+        "请输入手机号".to_string()
+    } else {
+        format!("+86 {}", form.phone)
+    };
+    render_login_input(
+        frame,
+        Rect {
+            x: fields.x,
+            y: fields.y,
+            width: fields.width,
+            height: 1,
+        },
+        "手机号",
+        &phone_value,
+        form.field == LoginField::PhoneNumber,
+        !form.phone.is_empty(),
+        capabilities,
+    );
+    let captcha_value = if form.captcha.is_empty() {
+        if form.captcha_sent {
+            "请输入短信验证码".to_string()
+        } else {
+            "先发送验证码".to_string()
+        }
+    } else {
+        captcha_mask(&form.captcha, capabilities)
+    };
+    render_login_input(
+        frame,
+        Rect {
+            x: fields.x,
+            y: fields.y.saturating_add(2),
+            width: fields.width,
+            height: 1,
+        },
+        "验证码",
+        &captcha_value,
+        form.field == LoginField::Captcha,
+        !form.captcha.is_empty(),
+        capabilities,
+    );
+
+    // Keep feedback directly below the captcha input.  Two fixed rows avoid
+    // layout jitter while allowing a complete cause + recovery message at the
+    // minimum supported terminal size (52×13).
+    let status_y = form_area.bottom().saturating_sub(4);
+    frame.render_widget(
+        Paragraph::new(sanitize_multiline(&form.status))
+            .style(
+                Style::default()
+                    .fg(status_color(&form.status))
+                    .bg(BACKGROUND),
+            )
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        Rect {
+            x: form_area.x.saturating_add(1),
+            y: status_y,
+            width: form_area.width.saturating_sub(2),
+            height: 2,
+        },
+    );
+    let action = if form.sending {
+        "正在发送验证码…"
+    } else if form.authenticating {
+        "正在登录…"
+    } else if form.field == LoginField::PhoneNumber {
+        "Enter 发送验证码"
+    } else {
+        "Enter 登录"
+    };
+    let help = if form.status.contains("网络风险") {
+        // A server-side risk response is not a cue to hammer the endpoint.
+        // Keep the recovery instruction next to the field and do not promote
+        // another immediate resend or login attempt in the footer.
+        "Esc 清空 · Ctrl+X 退出".to_string()
+    } else {
+        format!("Tab 切换输入 · {action} · r 重发 · Esc 清空")
+    };
+    frame.render_widget(
+        Paragraph::new(help)
+            .style(Style::default().fg(MUTED).bg(BACKGROUND))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        Rect {
+            x: form_area.x,
+            y: form_area.bottom().saturating_sub(1),
+            width: form_area.width,
+            height: 1,
+        },
+    );
+}
+
+#[allow(dead_code)]
+fn render_login_input(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    active: bool,
+    has_value: bool,
+    capabilities: Capabilities,
+) {
+    let marker = if active {
+        if capabilities.unicode {
+            "›"
+        } else {
+            ">"
+        }
+    } else {
+        " "
+    };
+    let value_width = area.width.saturating_sub(12) as usize;
+    let display = truncate_display(value, value_width);
+    let line = if active {
+        Line::from(format!("{marker} {label}  {display}"))
+    } else {
+        Line::from(vec![
+            Span::styled(format!("{marker} {label}"), Style::default().fg(MUTED)),
+            Span::raw("  "),
+            Span::styled(
+                display,
+                Style::default().fg(if has_value { FOREGROUND } else { MUTED }),
+            ),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(line).style(if active {
+            selected_style()
+        } else {
+            Style::default().fg(FOREGROUND).bg(BACKGROUND)
+        }),
+        area,
+    );
+}
+
+#[allow(dead_code)]
+fn captcha_mask(value: &str, capabilities: Capabilities) -> String {
+    let glyph = if capabilities.unicode { "•" } else { "*" };
+    glyph.repeat(value.chars().count())
 }
 
 fn render_library(frame: &mut Frame, app: &mut App, area: Rect, capabilities: Capabilities) {
@@ -433,7 +954,9 @@ fn render_header(frame: &mut Frame, area: Rect, title: &str, user: Option<&str>,
             height: 1,
         },
     );
-    let status_width = area.width.saturating_sub(4).min(42) as usize;
+    // This line does not compete with the title, so use all available cells
+    // rather than imposing an arbitrary 42-cell truncation cap.
+    let status_width = area.width.saturating_sub(4) as usize;
     frame.render_widget(
         Paragraph::new(truncate_display(status, status_width))
             .style(Style::default().fg(status_color(status)).bg(BACKGROUND))
@@ -1517,12 +2040,18 @@ fn status_color(status: &str) -> Color {
         || status.contains("无法")
         || status.contains("错误")
         || status.contains("不可")
+        || status.contains("未完成")
+        || status.contains("拒绝")
+        || status.contains("风险")
     {
         ERROR
     } else if status.contains("等待")
+        || status.contains("已扫码")
         || status.contains("加载")
         || status.contains("准备")
-        || status.contains("扫描")
+        || status.contains("发送")
+        || status.contains("验证")
+        || status.contains("恢复")
     {
         WARNING
     } else if status.contains("成功")
@@ -1542,17 +2071,22 @@ mod tests {
     use std::sync::Arc;
 
     use clarus_core::{
-        Album, Artist, AuthUser, LyricLine, MusicCore, PlaylistSummary, Track, TrackLyrics,
+        Album, Artist, AuthUser, LyricLine, MusicCore, PlaylistSummary, QrLogin, Track, TrackLyrics,
     };
-    use ratatui::{backend::TestBackend, style::Color, Terminal};
+    use ratatui::{
+        backend::TestBackend,
+        style::{Color, Modifier},
+        Terminal,
+    };
     use tokio::sync::mpsc;
     use unicode_width::UnicodeWidthStr;
 
-    use crate::app::{App, AuthState, Content, Focus};
+    use crate::app::{App, AuthState, Content, Focus, LoginField, PhoneLogin};
+    use crate::theme::{Rgb, TerminalColors, Theme};
 
     use super::{
-        compact_duration_column, playlist_row, progress_bar, render, sanitize_inline,
-        sanitize_multiline, track_column_widths, track_middle, track_row,
+        compact_duration_column, playlist_row, progress_bar, render, render_with_theme,
+        sanitize_inline, sanitize_multiline, track_column_widths, track_middle, track_row,
         track_row_with_duration_column, truncate_display, wrap_display_text, Capabilities,
     };
 
@@ -1590,6 +2124,287 @@ mod tests {
         assert!(!super::locale_supports_unicode(Some(OsStr::new(
             "C.ISO8859-1"
         ))));
+    }
+
+    #[test]
+    fn qr_login_is_rendered_without_sms_fields() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        let key = "a".repeat(48);
+        app.auth = AuthState::QrLogin {
+            qr: Some(QrLogin {
+                login_url: format!("https://music.163.com/login?codekey={key}"),
+                key,
+            }),
+            status: "请使用网易云音乐扫描二维码".to_string(),
+            checking: false,
+        };
+        let capabilities = Capabilities {
+            unicode: true,
+            true_color: true,
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, capabilities))
+            .unwrap();
+        let symbols = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let visible_text = symbols
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(symbols.contains('▀') || symbols.contains('▄'));
+        assert!(!visible_text.contains("手机号"));
+        assert!(!visible_text.contains("验证码"));
+    }
+
+    #[test]
+    fn compact_qr_login_shows_the_phone_confirmation_state() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        let key = "a".repeat(48);
+        app.auth = AuthState::QrLogin {
+            qr: Some(QrLogin {
+                login_url: format!("https://music.163.com/login?codekey={key}"),
+                key,
+            }),
+            status: "已扫码，请在网易云音乐 App 中确认登录".to_string(),
+            checking: false,
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &mut app,
+                    Capabilities {
+                        unicode: true,
+                        true_color: true,
+                    },
+                )
+            })
+            .unwrap();
+        let symbols = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let visible_text = symbols
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+
+        assert!(visible_text.contains("已扫码"));
+        assert!(visible_text.contains("确认登录"));
+    }
+
+    #[test]
+    fn retained_sms_state_is_not_exposed_by_renderer() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        app.auth = AuthState::Login {
+            form: PhoneLogin {
+                phone: String::new(),
+                captcha: String::new(),
+                field: LoginField::PhoneNumber,
+                captcha_sent: false,
+                sending: false,
+                authenticating: false,
+                resend_available_at: None,
+                status: "输入 +86 手机号后按 Enter 发送验证码".to_string(),
+            },
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &mut app,
+                    Capabilities {
+                        unicode: true,
+                        true_color: true,
+                    },
+                )
+            })
+            .unwrap();
+
+        let symbols = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let visible_text = symbols
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(visible_text.contains("二维码登录"));
+        assert!(!visible_text.contains("手机号"));
+        assert!(!visible_text.contains("验证码"));
+    }
+
+    #[test]
+    fn qr_login_keeps_a_high_contrast_quiet_zone_in_terminal_theme() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        app.auth = AuthState::QrLogin {
+            qr: Some(QrLogin {
+                key: "test".to_string(),
+                login_url: "https://music.163.com/login?codekey=test".to_string(),
+            }),
+            status: "请使用网易云音乐扫描二维码".to_string(),
+            checking: false,
+        };
+        let backend = TestBackend::new(96, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_with_theme(
+                    frame,
+                    &mut app,
+                    Capabilities {
+                        unicode: true,
+                        true_color: true,
+                    },
+                    Theme::terminal_with_defaults(TerminalColors {
+                        foreground: Rgb {
+                            red: 220,
+                            green: 220,
+                            blue: 220,
+                        },
+                        background: Rgb {
+                            red: 30,
+                            green: 30,
+                            blue: 30,
+                        },
+                    }),
+                )
+            })
+            .unwrap();
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| { matches!(cell.bg, Color::Indexed(16) | Color::Indexed(231)) }));
+    }
+
+    #[test]
+    fn terminal_theme_leaves_the_terminal_background_unpainted_and_uses_reverse_focus() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        app.auth = AuthState::Authenticated(AuthUser {
+            user_id: 1,
+            nickname: "测试用户".to_string(),
+            vip_type: 0,
+        });
+        app.content = Content::Daily {
+            tracks: vec![test_track(1)],
+        };
+        app.focus = Focus::Content;
+        let theme = Theme::terminal_with_defaults(TerminalColors {
+            foreground: Rgb {
+                red: 230,
+                green: 230,
+                blue: 230,
+            },
+            background: Rgb {
+                red: 18,
+                green: 18,
+                blue: 18,
+            },
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_with_theme(
+                    frame,
+                    &mut app,
+                    Capabilities {
+                        unicode: true,
+                        true_color: true,
+                    },
+                    theme,
+                )
+            })
+            .unwrap();
+
+        let cells = terminal.backend().buffer().content();
+        assert!(cells
+            .iter()
+            .all(|cell| !matches!(cell.bg, Color::Black | Color::White)));
+        let focus = cells
+            .iter()
+            .enumerate()
+            .find(|(index, cell)| {
+                let x = (*index % 80) as u16;
+                let y = (*index / 80) as u16;
+                cell.symbol() == "›"
+                    && x >= app.hit_areas.content.x
+                    && y >= app.hit_areas.content.y + 2
+            })
+            .map(|(_, cell)| cell)
+            .expect("selected row marker should be present");
+        assert_eq!(focus.fg, Color::Reset);
+        assert_eq!(focus.bg, Color::Reset);
+        assert!(focus.modifier.contains(Modifier::REVERSED));
+        assert!(cells
+            .iter()
+            .any(|cell| matches!(cell.fg, Color::Rgb(_, _, _))));
+    }
+
+    #[test]
+    fn terminal_theme_without_defaults_never_guesses_a_fixed_rgb_gray() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut app = App::new_for_test(Arc::new(MusicCore::new()), tx);
+        app.auth = AuthState::Authenticated(AuthUser {
+            user_id: 1,
+            nickname: "测试用户".to_string(),
+            vip_type: 0,
+        });
+        app.content = Content::Daily {
+            tracks: vec![test_track(1)],
+        };
+        app.focus = Focus::Content;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_with_theme(
+                    frame,
+                    &mut app,
+                    Capabilities {
+                        unicode: true,
+                        true_color: true,
+                    },
+                    Theme::terminal(),
+                )
+            })
+            .unwrap();
+
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .all(|cell| !matches!(cell.fg, Color::Rgb(_, _, _))));
     }
 
     #[test]

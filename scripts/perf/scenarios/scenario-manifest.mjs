@@ -15,13 +15,18 @@ export const SCENARIO_IDS = Object.freeze([
   'idle',
   'interaction',
   'animation',
+  'artist-dfs-memory',
   'audio',
   'combined',
   'long-soak',
   'lifecycle-cycle',
 ])
 const SCENARIO_CLASSES = new Set(['runtime', 'startup'])
-const AUTOMATION_MODES = new Set(['external-sampler', 'native-manual-required'])
+const AUTOMATION_MODES = new Set([
+  'external-sampler',
+  'native-manual-required',
+  'self-driven-native',
+])
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,63}$/
 
 function assertPlainObject(value, label) {
@@ -66,7 +71,11 @@ function assertFixtureRoles(values, label, { allowEmpty = false } = {}) {
 }
 
 export function validateScenarioManifest(value) {
-  assertExactKeys(value, ['$schema', 'schemaVersion', 'fixtureRoles', 'requiredMetrics', 'scenarios'], 'manifest')
+  assertExactKeys(
+    value,
+    ['$schema', 'schemaVersion', 'fixtureRoles', 'requiredMetrics', 'scenarios'],
+    'manifest',
+  )
   if (value.$schema !== 'clarus.perf.scenarios' || value.schemaVersion !== 1) {
     throw new Error('manifest schema identity is unsupported')
   }
@@ -85,7 +94,15 @@ export function validateScenarioManifest(value) {
     const label = `manifest.scenarios[${index}]`
     assertExactKeys(
       scenario,
-      ['id', 'scenarioClass', 'automation', 'requiredRuns', 'durationSeconds', 'fixtureRoles', 'steps'],
+      [
+        'id',
+        'scenarioClass',
+        'automation',
+        'requiredRuns',
+        'durationSeconds',
+        'fixtureRoles',
+        'steps',
+      ],
       label,
     )
     if (scenario.id !== SCENARIO_IDS[index] || !SCENARIO_CLASSES.has(scenario.scenarioClass)) {
@@ -110,11 +127,25 @@ export function validateScenarioManifest(value) {
     if (scenario.scenarioClass === 'startup' && scenario.requiredRuns !== 10) {
       throw new Error('startup requires exactly ten cold-start runs')
     }
-    if (scenario.scenarioClass === 'runtime' && scenario.id !== 'long-soak' && scenario.id !== 'lifecycle-cycle' && scenario.requiredRuns !== 5) {
+    if (
+      scenario.scenarioClass === 'runtime' &&
+      scenario.id !== 'long-soak' &&
+      scenario.id !== 'lifecycle-cycle' &&
+      scenario.requiredRuns !== 5
+    ) {
       throw new Error(`${label} requires exactly five runtime runs`)
     }
     if (scenario.automation === 'external-sampler' && scenario.id !== 'idle') {
       throw new Error('only idle is currently executable by the external sampler')
+    }
+    if (scenario.automation === 'self-driven-native' && scenario.id !== 'artist-dfs-memory') {
+      throw new Error('only artist-dfs-memory is executable by the self-driven runner')
+    }
+    if (scenario.id === 'artist-dfs-memory' && scenario.automation !== 'self-driven-native') {
+      throw new Error('artist-dfs-memory requires the self-driven runner')
+    }
+    if (scenario.id === 'artist-dfs-memory' && scenario.durationSeconds < 600) {
+      throw new Error('artist-dfs-memory must include at least 600 seconds of recovery')
     }
   })
   return value

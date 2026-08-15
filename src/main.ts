@@ -5,13 +5,21 @@ import App from './App.vue'
 import { i18n } from '@/app/i18n'
 import { preloadPrimaryViews, router } from '@/app/router'
 import { useSettingsStore } from '@/features/settings/application/settings-store'
-import { useAuthStore } from '@/features/auth/application/auth-store'
-import { usePlayerStore } from '@/features/player/application/player-store'
+import { configureSettingsRuntime } from '@/features/settings/infrastructure/native-settings'
+import { configureAuthRuntime, useAuthStore } from '@/features/auth/application/auth-store'
+import { configureCatalogRuntime } from '@/features/catalog/infrastructure/native-catalog'
+import { configurePlayerRuntime, usePlayerStore } from '@/features/player/application/player-store'
 import { desktop } from '@/platform/desktop'
 import { installDesktopControls } from '@/platform/desktop-controls'
 import { executeWindowCloseAction, resolveWindowCloseAction } from '@/platform/window-close'
 import { installNativeTooltipBlocker } from '@/platform/native-tooltips'
 import { showAppAlert, showAppConfirm } from '@/platform/app-dialogs'
+import {
+  loadPerformanceConfig,
+  runPerformanceScenario,
+  type PerformanceConfig,
+} from '@/performance/self-runner'
+import { validatedLoopbackOrigin } from '@/performance/runtime-config'
 import '@/styles/global.scss'
 
 installNativeTooltipBlocker(document.documentElement)
@@ -19,11 +27,58 @@ installNativeTooltipBlocker(document.documentElement)
 const pinia = createPinia()
 const app = createApp(App).use(pinia).use(router).use(i18n)
 
+const performanceConfig: PerformanceConfig = desktop.isDesktop
+  ? await loadPerformanceConfig()
+  : {
+      enabled: false,
+      scenario: null,
+      iterations: 0,
+      recoverySeconds: 0,
+      audioUrl: null,
+      audioMimeType: 'audio/mpeg',
+      audioSizeBytes: 1,
+    }
+if (performanceConfig.enabled && performanceConfig.audioUrl !== null) {
+  configureCatalogRuntime({
+    mode: 'performance',
+    audioFixture: {
+      url: performanceConfig.audioUrl,
+      mimeType: performanceConfig.audioMimeType,
+      sizeBytes: performanceConfig.audioSizeBytes,
+    },
+  })
+  configureAuthRuntime({
+    mode: 'performance',
+    avatarOrigin: validatedLoopbackOrigin(performanceConfig.audioUrl),
+  })
+  configurePlayerRuntime({
+    mode: 'performance',
+    audioFixture: {
+      url: performanceConfig.audioUrl,
+      mimeType: performanceConfig.audioMimeType,
+      sizeBytes: performanceConfig.audioSizeBytes,
+    },
+  })
+} else {
+  configureCatalogRuntime({ mode: 'normal' })
+  configureAuthRuntime({ mode: 'normal' })
+  configurePlayerRuntime('normal')
+}
+configureSettingsRuntime(performanceConfig.enabled ? 'performance' : 'normal')
+
 const settingsStore = useSettingsStore(pinia)
 await settingsStore.initialize()
 await router.isReady()
-void useAuthStore(pinia).restore()
+if (performanceConfig.enabled) await router.replace('/artist/900000')
+else void useAuthStore(pinia).restore()
 app.mount('#app')
+const player = usePlayerStore(pinia)
+
+if (performanceConfig.enabled) {
+  void runPerformanceScenario(router, player, performanceConfig).catch((error: unknown) => {
+    console.error('Automated performance scenario failed', error)
+  })
+}
 
 function preloadPrimaryViewsWhenIdle(): void {
   const preload = () => preloadPrimaryViews()
@@ -34,10 +89,9 @@ function preloadPrimaryViewsWhenIdle(): void {
   globalThis.setTimeout(preload, 180)
 }
 
-preloadPrimaryViewsWhenIdle()
+if (!performanceConfig.enabled) preloadPrimaryViewsWhenIdle()
 
 async function installDesktopControlBridge(): Promise<void> {
-  const player = usePlayerStore(pinia)
   const { getCurrentWindow } = await import('@tauri-apps/api/window')
   await installDesktopControls(settingsStore, {
     player,
@@ -115,7 +169,7 @@ async function installSettingsCloseFlush(): Promise<void> {
   })
 }
 
-if (desktop.isDesktop) {
+if (desktop.isDesktop && !performanceConfig.enabled) {
   void installDesktopControlBridge().catch((error: unknown) => {
     console.error('Failed to install desktop controls', error)
   })

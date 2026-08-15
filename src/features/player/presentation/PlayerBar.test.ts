@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
     error: null,
     playing: false,
     enabled: true,
+    playbackClock: { read: vi.fn(() => 0) },
     togglePlayback: vi.fn(),
     seek: vi.fn(),
     setVolume: vi.fn(),
@@ -39,8 +40,16 @@ const mocks = vi.hoisted(() => ({
   toast: { show: vi.fn() },
 }))
 
+const schedulerMocks = vi.hoisted(() => ({
+  subscribe: vi.fn(),
+  wake: vi.fn(),
+}))
+
 vi.mock('@/features/player/application/player-store', () => ({
   usePlayerStore: () => mocks.player,
+}))
+vi.mock('@/features/player/application/playback-frame-scheduler', () => ({
+  playbackFrameScheduler: schedulerMocks,
 }))
 vi.mock('@/features/lyrics/application/lyrics-store', () => ({
   useLyricsStore: () => mocks.lyrics,
@@ -103,6 +112,11 @@ describe('PlayerBar controls', () => {
     mocks.player.shuffle = false
     mocks.player.queueBusy = false
     mocks.player.pendingTrack = null
+    mocks.player.playing = false
+    mocks.player.progress = 0
+    mocks.player.duration = 180
+    schedulerMocks.subscribe.mockReset()
+    schedulerMocks.wake.mockReset()
   })
 
   afterEach(() => {
@@ -195,6 +209,65 @@ describe('PlayerBar controls', () => {
     progress.dispatchEvent(new Event('change', { bubbles: true }))
     expect(mocks.player.seek).toHaveBeenCalledWith(72)
     expect(mocks.player.togglePlayback).toHaveBeenCalledOnce()
+    app.unmount()
+  })
+
+  it('updates the visible playback progress directly from the shared frame clock', async () => {
+    mocks.player.playing = true
+    mocks.player.progress = 4
+    const stop = vi.fn()
+    const frame = {
+      tick: null as ((timestamp: number, currentTime: number) => void) | null,
+    }
+    schedulerMocks.subscribe.mockImplementation((subscriber) => {
+      frame.tick = subscriber
+      return stop
+    })
+
+    const { app, root } = await mountBar()
+    const progress = root.querySelector<HTMLInputElement>('input.progress')
+
+    expect(schedulerMocks.subscribe).toHaveBeenCalledWith(
+      expect.any(Function),
+      mocks.player.playbackClock.read,
+    )
+    frame.tick?.(100, 90)
+
+    expect(progress?.value).toBe('90')
+    expect(progress?.style.getPropertyValue('--range-progress')).toBe('50%')
+    expect(root.querySelector('.progress-row span')?.textContent).toBe('1:30')
+    expect(mocks.player.progress).toBe(4)
+
+    app.unmount()
+    expect(stop).toHaveBeenCalledOnce()
+  })
+
+  it('holds a seek preview when a cancelled frame callback arrives', async () => {
+    mocks.player.playing = true
+    mocks.player.progress = 4
+    const stop = vi.fn()
+    const frame = {
+      tick: null as ((timestamp: number, currentTime: number) => void) | null,
+    }
+    schedulerMocks.subscribe.mockImplementation((subscriber) => {
+      frame.tick = subscriber
+      return stop
+    })
+
+    const { app, root } = await mountBar()
+    const progress = root.querySelector<HTMLInputElement>('input.progress')
+    expect(progress).not.toBeNull()
+    if (!progress) return
+
+    progress.value = '72'
+    progress.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    progress.dispatchEvent(new Event('input', { bubbles: true }))
+    frame.tick?.(100, 90)
+
+    expect(stop).toHaveBeenCalledOnce()
+    expect(progress.value).toBe('72')
+    expect(root.querySelector('.progress-row span')?.textContent).toBe('1:12')
+
     app.unmount()
   })
 

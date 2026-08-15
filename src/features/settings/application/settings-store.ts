@@ -10,7 +10,7 @@ import {
   type AppTheme,
   type LyricFontSize,
 } from '../domain/settings'
-import { nativeSettingsGateway, type SettingsGateway } from '../infrastructure/native-settings'
+import { runtimeSettingsGateway, type SettingsGateway } from '../infrastructure/native-settings'
 import { CoalescedSettingsWriter } from './coalesced-settings-writer'
 
 function resolvedLocale(locale: AppLocale): Exclude<AppLocale, 'auto'> {
@@ -59,8 +59,12 @@ function applyVisualSettings(settings: AppSettings): void {
   setAppLocale(locale)
 }
 
-export function createSettingsStore(gateway: SettingsGateway = nativeSettingsGateway) {
+export function createSettingsStore(gateway?: SettingsGateway) {
   return defineStore('settings', () => {
+    // Resolve the default at Pinia-store creation time. Main configures the
+    // performance boundary before first use; explicit test/application
+    // gateways still take precedence.
+    const resolvedGateway = gateway ?? runtimeSettingsGateway()
     const settings = shallowRef<AppSettings>(cloneSettings(defaultSettings))
     const initialized = shallowRef(false)
     const persistenceError = shallowRef<string | null>(null)
@@ -68,7 +72,7 @@ export function createSettingsStore(gateway: SettingsGateway = nativeSettingsGat
 
     const writer = new CoalescedSettingsWriter<AppSettings>({
       clone: cloneSettings,
-      save: (snapshot) => gateway.save(snapshot),
+      save: (snapshot) => resolvedGateway.save(snapshot),
       onError(error) {
         persistenceError.value = error instanceof Error ? error.message : String(error)
       },
@@ -81,7 +85,7 @@ export function createSettingsStore(gateway: SettingsGateway = nativeSettingsGat
 
     async function initialize(): Promise<void> {
       if (initialization !== null) return initialization
-      initialization = gateway
+      initialization = resolvedGateway
         .load()
         .then((loaded) => {
           settings.value = normalizeVisualSettings(cloneSettings(loaded))

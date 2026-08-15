@@ -6,8 +6,11 @@ use serde_json::Value;
 use tauri::State;
 
 use crate::{
-    catalog::{array, parse_track_with_privilege, value_i64, CatalogItem},
+    catalog::{
+        array, parse_track_with_privilege, performance_fixture_track, value_i64, CatalogItem,
+    },
     music_api::{with_request_context, ApiFailure, MusicApiState},
+    performance::PerformanceState,
 };
 
 const MAX_DAILY_SONGS: usize = 100;
@@ -76,11 +79,33 @@ async fn load_daily_songs(
     parse_daily_songs_response(response)
 }
 
+fn performance_daily_songs(performance_state: &PerformanceState) -> DailySongs {
+    DailySongs {
+        tracks: (0_i64..24)
+            .map(|index| {
+                performance_fixture_track(
+                    999_000 + index,
+                    900_000,
+                    performance_state
+                        .image_fixture_url(&format!("/clarus-perf/daily/{index}.png"))
+                        .unwrap_or_else(|| {
+                            format!("https://p1.music.126.net/clarus-perf/daily/{index}.png")
+                        }),
+                )
+            })
+            .collect(),
+    }
+}
+
 #[tauri::command]
 pub async fn daily_songs(
     request_id: String,
     state: State<'_, MusicApiState>,
+    performance_state: State<'_, PerformanceState>,
 ) -> Result<DailySongs, ApiFailure> {
+    if performance_state.artist_fixtures_enabled() {
+        return Ok(performance_daily_songs(&performance_state));
+    }
     let (client, cookie, real_ip) = state.request_context().await;
     state
         .run_cancellable(request_id, async move {

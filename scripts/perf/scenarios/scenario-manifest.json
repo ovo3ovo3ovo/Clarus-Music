@@ -77,8 +77,23 @@
       "fixtureRoles": ["tone-short-mp3", "word-timed-yrc"],
       "steps": [
         "open lyrics with word timing and translation/romanization",
-        "capture 60 Hz active-line, word-fill and scroll-spring traces",
+        "capture native-display-rate active-line, word-fill and scroll-spring traces with a 120 Hz target",
         "exercise wheel, touch, hover, context menu and reduced-motion"
+      ]
+    },
+    {
+      "id": "artist-dfs-memory",
+      "scenarioClass": "runtime",
+      "automation": "self-driven-native",
+      "requiredRuns": 5,
+      "durationSeconds": 660,
+      "fixtureRoles": ["tone-long-mp3"],
+      "steps": [
+        "launch the exact release bundle with keychain and account restore disabled",
+        "visit and fully scroll at least 50 deterministic offline artist fixtures through similar-artist DFS edges",
+        "return to the normal /daily/songs home route and play the verified local Range audio fixture",
+        "sample WebContent, main, GPU and Networking physical footprint plus RSS once per second through DFS and at least 600 seconds of recovery",
+        "record image load/error/reload/blank and active-request telemetry, native-display frame intervals, peak footprint, stable footprint and recovery slope"
       ]
     },
     {

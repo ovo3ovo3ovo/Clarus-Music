@@ -1,8 +1,10 @@
 export type AudioEngineState =
   'idle' | 'loading' | 'ready' | 'playing' | 'paused' | 'ended' | 'error'
 
+export type AudioSourceProvenance = 'performance-fixture'
+
 export type AudioSource =
-  | Readonly<{ kind: 'remote'; url: string }>
+  | Readonly<{ kind: 'remote'; url: string; provenance?: AudioSourceProvenance }>
   | Readonly<{ kind: 'managed-url'; url: string; mimeType: string; release: () => void }>
 
 export function releaseAudioSource(source: AudioSource): void {

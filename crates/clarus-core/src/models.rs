@@ -150,6 +150,10 @@ pub struct PlaylistTrackPage {
     pub requested_count: u64,
 }
 
+/// A short-lived key and the URL encoded into the terminal QR code.
+///
+/// The key is deliberately separate from the URL so the core can poll the
+/// service without making the presentation layer parse an external URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QrLogin {
     pub key: String,
@@ -181,6 +185,15 @@ pub struct AuthUser {
 pub struct AuthSession {
     pub authenticated: bool,
     pub user: Option<AuthUser>,
+}
+
+/// Result of a successful SMS login. The session is always kept in memory;
+/// `saved_to_keychain` tells the UI whether it will also survive the next
+/// launch without exposing the authenticated cookie.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmsLogin {
+    pub user: AuthUser,
+    pub saved_to_keychain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,7 +2,11 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cloneSettings, defaultSettings, type AppSettings } from '../domain/settings'
 import { createSettingsStore, normalizeAppTheme, normalizeLyricFontSize } from './settings-store'
-import type { SettingsGateway } from '../infrastructure/native-settings'
+import {
+  configureSettingsRuntime,
+  nativeSettingsGateway,
+  type SettingsGateway,
+} from '../infrastructure/native-settings'
 
 function gatewayFor(settings: AppSettings) {
   let lastSaved: AppSettings | null = null
@@ -18,9 +22,64 @@ function gatewayFor(settings: AppSettings) {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
+  configureSettingsRuntime('normal')
   document.documentElement.removeAttribute('data-theme')
   document.documentElement.removeAttribute('data-theme-color')
   document.documentElement.removeAttribute('lang')
+})
+
+describe('settings runtime isolation', () => {
+  it('resolves performance mode when the store factory was defined before runtime setup', async () => {
+    const createStore = createSettingsStore()
+    const load = vi.spyOn(nativeSettingsGateway, 'load')
+    const save = vi.spyOn(nativeSettingsGateway, 'save')
+    configureSettingsRuntime('performance')
+    const store = createStore(createPinia())
+
+    await store.initialize()
+    store.update({ locale: 'tr' })
+    await store.flush()
+
+    expect(load).not.toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+    await store.dispose()
+  })
+
+  it('never loads or saves through the native gateway in performance mode', async () => {
+    configureSettingsRuntime('performance')
+    const load = vi.spyOn(nativeSettingsGateway, 'load')
+    const save = vi.spyOn(nativeSettingsGateway, 'save')
+    const store = createSettingsStore()(createPinia())
+
+    await store.initialize()
+    store.update({ locale: 'tr' })
+    await store.flush()
+
+    expect(store.settings).toMatchObject({ locale: 'tr' })
+    expect(load).not.toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+    await store.dispose()
+  })
+
+  it('continues to use the native gateway in normal mode after a performance reset', async () => {
+    configureSettingsRuntime('performance')
+    configureSettingsRuntime('normal')
+    const loaded = { ...cloneSettings(defaultSettings), locale: 'zh-TW' as const }
+    const load = vi.spyOn(nativeSettingsGateway, 'load').mockResolvedValue(loaded)
+    const save = vi.spyOn(nativeSettingsGateway, 'save').mockResolvedValue()
+    const store = createSettingsStore()(createPinia())
+
+    await store.initialize()
+    store.update({ locale: 'en' })
+    await store.flush()
+
+    expect(load).toHaveBeenCalledOnce()
+    expect(store.settings.locale).toBe('en')
+    expect(save).toHaveBeenCalledOnce()
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ locale: 'en' }))
+    await store.dispose()
+  })
 })
 
 describe('settings appearance', () => {

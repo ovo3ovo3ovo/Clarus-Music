@@ -28,50 +28,40 @@ describe('native audio cache boundary', () => {
     ).toEqual({ trackCount: 1, totalBytes: limitBytes + 1, limitBytes })
   })
 
-  it('maps a cache hit to raw IPC bytes for a seek-safe Blob', async () => {
-    const bytes = new Uint8Array(2048).buffer
+  it('maps a cache hit to the loopback Range stream without whole-file IPC', async () => {
     const invokeCommand = vi.fn(async (command: string) => {
       if (command === 'lookup_audio_cache') {
         return {
-          filePath: '/cache/audio-v1/song.mp3',
+          streamUrl: 'http://127.0.0.1:43123/v1/audio/audio-cache-1?token=secret',
           mimeType: 'audio/mpeg',
           sizeBytes: 2048,
           leaseId: 'audio-cache-1',
         }
       }
-      if (command === 'read_audio_cache_bytes') return bytes
       return true
     })
     const gateway = new NativeAudioCacheGateway(
       invokeCommand as unknown as ConstructorParameters<typeof NativeAudioCacheGateway>[0],
       true,
       () => 'cache-read-1',
-      () => {
-        throw new Error('asset protocol unavailable')
-      },
     )
 
     const source = await gateway.lookup(42, '320000')
-    expect(source).toEqual({ kind: 'bytes', bytes, mimeType: 'audio/mpeg' })
-    expect(invokeCommand).toHaveBeenCalledWith('read_audio_cache_bytes', {
-      leaseId: 'audio-cache-1',
-      requestId: 'cache-read-1',
+    expect(source).toMatchObject({
+      kind: 'managed-url',
+      url: 'http://127.0.0.1:43123/v1/audio/audio-cache-1?token=secret',
+      mimeType: 'audio/mpeg',
     })
-    await vi.waitFor(() => {
-      expect(invokeCommand).toHaveBeenCalledWith('release_audio_cache_lease', {
-        leaseId: 'audio-cache-1',
-      })
-    })
-    expect(
-      invokeCommand.mock.calls.filter(([command]) => command === 'release_audio_cache_lease'),
-    ).toHaveLength(1)
+    expect(invokeCommand.mock.calls.map(([command]) => command)).toEqual(['lookup_audio_cache'])
+    if (source?.kind !== 'managed-url') throw new Error('expected managed URL source')
+    source.release()
   })
 
   it('maps a cache hit to a managed asset URL and holds the lease until release', async () => {
     const invokeCommand = vi.fn(async (command: string) => {
       if (command === 'lookup_audio_cache') {
         return {
-          filePath: '/cache/audio-v1/song.mp3',
+          streamUrl: 'http://127.0.0.1:43123/v1/audio/audio-cache-managed?token=secret',
           mimeType: 'audio/mpeg',
           sizeBytes: 2048,
           leaseId: 'audio-cache-managed',
@@ -83,14 +73,13 @@ describe('native audio cache boundary', () => {
       invokeCommand as unknown as ConstructorParameters<typeof NativeAudioCacheGateway>[0],
       true,
       undefined,
-      (filePath) => `asset://localhost/${encodeURIComponent(filePath)}`,
     )
 
     const source = await gateway.lookup(42, '320000')
 
     expect(source).toMatchObject({
       kind: 'managed-url',
-      url: 'asset://localhost/%2Fcache%2Faudio-v1%2Fsong.mp3',
+      url: 'http://127.0.0.1:43123/v1/audio/audio-cache-managed?token=secret',
       mimeType: 'audio/mpeg',
     })
     expect(invokeCommand).not.toHaveBeenCalledWith('read_audio_cache_bytes', expect.anything())
@@ -109,28 +98,23 @@ describe('native audio cache boundary', () => {
     ).toHaveLength(1)
   })
 
-  it('downloads and returns local bytes before the first playback', async () => {
-    const bytes = new Uint8Array([1, 2, 3, 4]).buffer
+  it('downloads and returns a local Range stream before the first playback', async () => {
     const invokeCommand = vi.fn(async (command: string) => {
       if (command === 'store_audio_cache') return { stored: true }
       if (command === 'lookup_audio_cache') {
         return {
-          filePath: '/cache/audio-v1/song.mp3',
+          streamUrl: 'http://127.0.0.1:43123/v1/audio/audio-cache-first-play?token=secret',
           mimeType: 'audio/mpeg',
           sizeBytes: 4,
           leaseId: 'audio-cache-first-play',
         }
       }
-      if (command === 'read_audio_cache_bytes') return bytes
       return true
     })
     const gateway = new NativeAudioCacheGateway(
       invokeCommand as unknown as ConstructorParameters<typeof NativeAudioCacheGateway>[0],
       true,
       () => 'cache-first-play',
-      () => {
-        throw new Error('asset protocol unavailable')
-      },
     )
 
     await expect(
@@ -141,12 +125,15 @@ describe('native audio cache boundary', () => {
         mimeType: 'audio/mpeg',
         expectedSizeBytes: 4,
       }),
-    ).resolves.toEqual({ kind: 'bytes', bytes, mimeType: 'audio/mpeg' })
+    ).resolves.toMatchObject({
+      kind: 'managed-url',
+      url: 'http://127.0.0.1:43123/v1/audio/audio-cache-first-play?token=secret',
+      mimeType: 'audio/mpeg',
+    })
 
-    expect(invokeCommand.mock.calls.map(([command]) => command).slice(0, 3)).toEqual([
+    expect(invokeCommand.mock.calls.map(([command]) => command)).toEqual([
       'store_audio_cache',
       'lookup_audio_cache',
-      'read_audio_cache_bytes',
     ])
   })
 
@@ -240,6 +227,24 @@ describe('native audio cache boundary', () => {
       totalBytes: 0,
       limitBytes: null,
     })
+    expect(invokeCommand).not.toHaveBeenCalled()
+  })
+
+  it('does not invoke lookup or store commands for a performance fixture', async () => {
+    const invokeCommand = vi.fn()
+    const gateway = new NativeAudioCacheGateway(invokeCommand, true)
+    gateway.configureRuntime('performance')
+
+    await expect(gateway.lookup(999_000, '999000')).resolves.toBeNull()
+    await expect(
+      gateway.prepare({
+        trackId: 999_000,
+        quality: '999000',
+        sourceUrl: 'http://127.0.0.1:43123/tone-long-mp3.mp3',
+        mimeType: 'audio/mpeg',
+        expectedSizeBytes: 100,
+      }),
+    ).resolves.toBeNull()
     expect(invokeCommand).not.toHaveBeenCalled()
   })
 })

@@ -12,6 +12,11 @@ type ListenerRegistry = {
 
 type AudioElementFactory = () => HTMLAudioElement
 
+type ActiveSource = Readonly<{
+  generation: number
+  expectedUrl: string
+}>
+
 function abortError(reason?: unknown): DOMException {
   return new DOMException(String(reason ?? 'Audio load aborted'), 'AbortError')
 }
@@ -44,6 +49,8 @@ export class HtmlAudioEngine implements AudioEngine {
   private currentState: AudioEngineState = 'idle'
   private ownedRelease: (() => void) | null = null
   private loadController: AbortController | null = null
+  private loadGeneration = 0
+  private activeSource: ActiveSource | null = null
   private outputDeviceId = 'default'
   private desiredVolume = 1
   private disposed = false
@@ -83,6 +90,7 @@ export class HtmlAudioEngine implements AudioEngine {
 
   async load(source: AudioSource, signal?: AbortSignal): Promise<void> {
     this.assertActive()
+    const generation = this.nextLoadGeneration()
     this.cancelPendingLoad()
     this.releaseSource()
     if (signal?.aborted) {
@@ -98,6 +106,11 @@ export class HtmlAudioEngine implements AudioEngine {
     this.setState('loading')
     this.audio.preload = 'metadata'
     this.audio.src = source.url
+    // Read back the DOM-normalized URL. `currentSrc` uses the same form, so
+    // later media events can prove that they belong to this load rather than
+    // to a native event still draining from a superseded source.
+    const expectedUrl = this.audio.src
+    this.activeSource = { generation, expectedUrl }
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -107,39 +120,44 @@ export class HtmlAudioEngine implements AudioEngine {
           controller.signal.removeEventListener('abort', handleAbort)
         }
         const handleMetadata = () => {
+          // Do not clean up on a stale event: these listeners now belong to
+          // the current request and must remain armed for its real metadata.
+          if (!this.isCurrentLoad(controller, generation, expectedUrl)) return
           cleanup()
-          if (this.loadController !== controller || controller.signal.aborted) return
           this.setState('ready')
           this.emit('duration', this.duration)
           void this.applyOutputDevice().catch((reason: unknown) => {
+            if (!this.isCurrentSource(generation, expectedUrl)) return
             const error = reason instanceof Error ? reason : new Error(String(reason))
             this.emit('error', error)
           })
           resolve()
         }
         const handleError = () => {
+          if (!this.isCurrentLoad(controller, generation, expectedUrl)) return
           cleanup()
-          if (this.loadController !== controller || controller.signal.aborted) return
           const error = mediaError(this.audio)
           this.setState('error')
           reject(error)
         }
         const handleAbort = () => {
           cleanup()
-          if (this.loadController === controller) this.resetElement()
+          if (this.ownsLoad(controller, generation)) this.resetElement()
           reject(abortError(controller.signal.reason))
         }
-        this.audio.addEventListener('loadedmetadata', handleMetadata, { once: true })
-        this.audio.addEventListener('error', handleError, { once: true })
+        // These deliberately are not `{ once: true }`: a stale native event
+        // would consume a once-listener before its guard can reject it.
+        this.audio.addEventListener('loadedmetadata', handleMetadata)
+        this.audio.addEventListener('error', handleError)
         controller.signal.addEventListener('abort', handleAbort, { once: true })
         this.audio.load()
       })
     } catch (error) {
-      if (this.loadController === controller) this.releaseSource()
+      if (this.ownsLoad(controller, generation)) this.releaseSource()
       throw error
     } finally {
       signal?.removeEventListener('abort', forwardAbort)
-      if (this.loadController === controller) this.loadController = null
+      if (this.ownsLoad(controller, generation)) this.loadController = null
     }
   }
 
@@ -197,6 +215,7 @@ export class HtmlAudioEngine implements AudioEngine {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.nextLoadGeneration()
     this.cancelPendingLoad()
     this.releaseSource()
     this.audio.removeEventListener('play', this.handlePlay)
@@ -210,18 +229,38 @@ export class HtmlAudioEngine implements AudioEngine {
     this.currentState = 'idle'
   }
 
-  private readonly handlePlay = () => this.setState('playing')
+  private readonly handlePlay = () => {
+    if (this.hasCurrentSource()) this.setState('playing')
+  }
   private readonly handlePause = () => {
-    if (!this.disposed && this.currentState !== 'loading' && this.currentState !== 'idle') {
+    if (
+      !this.disposed &&
+      this.hasCurrentSource() &&
+      this.currentState !== 'loading' &&
+      this.currentState !== 'idle'
+    ) {
       this.setState('paused')
     }
   }
-  private readonly handleEnded = () => this.setState('ended')
-  private readonly handleTimeUpdate = () => this.emit('time', this.currentTime)
-  private readonly handleSeeked = () => this.emit('seeked', this.currentTime)
+  private readonly handleEnded = () => {
+    if (this.hasCurrentSource()) this.setState('ended')
+  }
+  private readonly handleTimeUpdate = () => {
+    if (this.hasCurrentSource()) this.emit('time', this.currentTime)
+  }
+  private readonly handleSeeked = () => {
+    if (this.hasCurrentSource()) this.emit('seeked', this.currentTime)
+  }
   private readonly handleVolumeChange = () => this.emit('volume', this.volume)
   private readonly handleRuntimeError = () => {
-    if (this.currentState === 'loading' || this.currentState === 'idle' || this.disposed) return
+    if (
+      this.currentState === 'loading' ||
+      this.currentState === 'idle' ||
+      this.disposed ||
+      !this.hasCurrentSource()
+    ) {
+      return
+    }
     const error = mediaError(this.audio)
     this.setState('error')
     this.emit('error', error)
@@ -241,6 +280,7 @@ export class HtmlAudioEngine implements AudioEngine {
   }
 
   private resetElement(): void {
+    this.activeSource = null
     this.audio.pause()
     this.audio.removeAttribute('src')
     this.audio.load()
@@ -251,6 +291,51 @@ export class HtmlAudioEngine implements AudioEngine {
     const release = this.ownedRelease
     this.ownedRelease = null
     release?.()
+  }
+
+  private nextLoadGeneration(): number {
+    this.loadGeneration += 1
+    return this.loadGeneration
+  }
+
+  private ownsLoad(controller: AbortController, generation: number): boolean {
+    return (
+      this.loadController === controller && this.activeSource?.generation === generation
+    )
+  }
+
+  private isCurrentLoad(
+    controller: AbortController,
+    generation: number,
+    expectedUrl: string,
+  ): boolean {
+    return (
+      !controller.signal.aborted &&
+      this.ownsLoad(controller, generation) &&
+      this.isCurrentSource(generation, expectedUrl)
+    )
+  }
+
+  private hasCurrentSource(): boolean {
+    const source = this.activeSource
+    return source !== null && this.isCurrentSource(source.generation, source.expectedUrl)
+  }
+
+  private isCurrentSource(generation: number, expectedUrl: string): boolean {
+    // Real media elements always expose `currentSrc`; the narrow fallback
+    // keeps lightweight non-DOM test doubles compatible without weakening the
+    // browser path, where an empty `currentSrc` deliberately never matches.
+    const currentSrc = this.audio.currentSrc
+    const matchesSource =
+      typeof currentSrc === 'string'
+        ? currentSrc === expectedUrl
+        : this.audio.src === expectedUrl
+    return (
+      !this.disposed &&
+      this.activeSource?.generation === generation &&
+      this.activeSource.expectedUrl === expectedUrl &&
+      matchesSource
+    )
   }
 
   private setState(state: AudioEngineState): void {

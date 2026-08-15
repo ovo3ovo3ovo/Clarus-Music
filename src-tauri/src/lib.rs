@@ -14,6 +14,7 @@ mod library;
 mod lyrics;
 mod music_api;
 mod music_video;
+mod performance;
 mod playlist;
 mod settings;
 #[cfg(target_os = "macos")]
@@ -51,6 +52,8 @@ fn exit_app(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let audio_cache_state = audio_cache::AudioCacheState::default();
+    let performance_state = performance::PerformanceState::from_environment()
+        .expect("invalid Clarus Music performance configuration");
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
@@ -60,6 +63,7 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_macos_fps::init());
     builder
         .manage(audio_cache_state.clone())
+        .manage(performance_state)
         .manage(music_api::MusicApiState::default())
         .manage(settings::SettingsState::default())
         .manage(unblock::UnblockMusicState::default())
@@ -203,6 +207,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             runtime_info,
+            performance::performance_config,
+            performance::performance_checkpoint,
+            performance::performance_wait_for_start,
             exit_app,
             external::open_netease_song,
             external::open_netease_album,

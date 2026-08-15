@@ -61,7 +61,7 @@ const FixedRowFixture = defineComponent({
 })
 
 function largeItems(): readonly number[] {
-  return Array.from({ length: 96 }, (_, index) => index + 1)
+  return Array.from({ length: 36 }, (_, index) => index + 1)
 }
 
 function mountFixture(items: readonly number[]) {
@@ -104,7 +104,7 @@ describe('useFixedRowVirtualizer', () => {
     app.unmount()
   })
 
-  it('mounts only virtual rows for 96 or more items', async () => {
+  it('mounts only virtual rows for 36 or more items', async () => {
     const { app, root } = mountFixture(largeItems())
     await nextTick()
 

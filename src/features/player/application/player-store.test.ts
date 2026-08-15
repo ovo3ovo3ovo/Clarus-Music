@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from 'pinia'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   AudioEngine,
   AudioEngineEventMap,
@@ -12,13 +12,13 @@ import type {
   PlayerMediaSession,
 } from '../infrastructure/browser-media-session'
 import type { Track } from '@/types/music'
-import type { TrackLikeGateway } from '../infrastructure/native-like'
+import { nativeTrackLikeGateway, type TrackLikeGateway } from '../infrastructure/native-like'
 import {
   PLAYER_QUEUE_SNAPSHOT_VERSION,
   type PlayerQueuePersistence,
   type PlayerQueueSnapshot,
 } from '../infrastructure/queue-snapshot'
-import { createPlayerStore } from './player-store'
+import { configurePlayerRuntime, createPlayerStore, usePlayerStore } from './player-store'
 import { playbackFrameScheduler } from './playback-frame-scheduler'
 
 const settingsMock = vi.hoisted(() => ({
@@ -529,7 +529,7 @@ describe('player queue navigation', () => {
     )
   })
 
-  it('uses one stable playback clock for the scheduler lease and progress subscription', () => {
+  it('keeps reactive progress on media events while exposing one stable visual clock', () => {
     const setClock = vi.spyOn(playbackFrameScheduler, 'setClock')
     const subscribe = vi.spyOn(playbackFrameScheduler, 'subscribe')
     const { engine, player } = setup()
@@ -537,13 +537,188 @@ describe('player queue navigation', () => {
     engine.emit('state', 'playing')
 
     const leaseClock = setClock.mock.calls.at(-1)?.[0]
-    const subscriptionClock = subscribe.mock.calls.at(-1)?.[1]
     expect(leaseClock).toBeDefined()
-    expect(subscriptionClock).toBe(leaseClock)
-    expect(subscriptionClock).toBe(player.playbackClock.read)
+    expect(leaseClock).toBe(player.playbackClock.read)
+    expect(subscribe).not.toHaveBeenCalled()
+
+    engine.currentTime = 12
+    engine.emit('time', 12)
+    expect(player.progress).toBe(12)
+
+    engine.currentTime = 24
+    expect(player.readCurrentTime()).toBe(24)
+    expect(player.progress).toBe(12)
+
+    engine.emit('seeked', 24)
+    expect(player.progress).toBe(24)
 
     player.dispose()
     setClock.mockRestore()
     subscribe.mockRestore()
+  })
+})
+
+describe('shared player runtime', () => {
+  function memoryStorage(): Storage {
+    const values = new Map<string, string>()
+    return {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        values.set(key, value)
+      }),
+      removeItem: vi.fn((key: string) => {
+        values.delete(key)
+      }),
+      clear: vi.fn(() => values.clear()),
+      key: vi.fn((index: number) => [...values.keys()][index] ?? null),
+      get length() {
+        return values.size
+      },
+    } as unknown as Storage
+  }
+
+  afterEach(() => {
+    configurePlayerRuntime('normal')
+    vi.unstubAllGlobals()
+  })
+
+  it.each(['normal', 'performance'] as const)(
+    '%s mode resolves one player and one native audio engine per Pinia instance',
+    (mode) => {
+      configurePlayerRuntime(mode)
+      const pinia = createPinia()
+      setActivePinia(pinia)
+      const createElement = vi.spyOn(document, 'createElement')
+
+      const uiPlayer = usePlayerStore(pinia)
+      const runnerPlayer = usePlayerStore(pinia)
+
+      expect(runnerPlayer).toBe(uiPlayer)
+      expect(
+        createElement.mock.calls.filter(([tagName]) => String(tagName).toLowerCase() === 'audio'),
+      ).toHaveLength(1)
+
+      uiPlayer.dispose()
+    },
+  )
+
+  it('performance mode never reads or writes the user queue in localStorage', () => {
+    configurePlayerRuntime('performance')
+    const storage = memoryStorage()
+    vi.stubGlobal('localStorage', storage)
+    const engine = new FakeEngine()
+    const mediaSession = new FakeMediaSession()
+    const useStore = createPlayerStore(
+      () => engine,
+      undefined,
+      undefined,
+      'player',
+      () => mediaSession,
+    )
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const player = useStore(pinia)
+
+    expect(storage.getItem).not.toHaveBeenCalled()
+    player.setQueue([track(1)], 0, 'performance-fixture')
+    player.dispose()
+
+    expect(storage.setItem).not.toHaveBeenCalled()
+    expect(storage.removeItem).not.toHaveBeenCalled()
+  })
+
+  it('normal mode keeps the bounded local queue persistence adapter', () => {
+    configurePlayerRuntime('normal')
+    const storage = memoryStorage()
+    vi.stubGlobal('localStorage', storage)
+    const engine = new FakeEngine()
+    const mediaSession = new FakeMediaSession()
+    const player = createPlayerStore(
+      () => engine,
+      undefined,
+      undefined,
+      'player',
+      () => mediaSession,
+    )
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const runtimePlayer = player(pinia)
+
+    expect(storage.getItem).toHaveBeenCalled()
+    runtimePlayer.setQueue([track(1)], 0, 'normal-fixture')
+    runtimePlayer.dispose()
+
+    expect(storage.setItem).toHaveBeenCalled()
+  })
+
+  it('performance mode uses a no-op like gateway while normal mode uses the native gateway', async () => {
+    const nativeCheck = vi.spyOn(nativeTrackLikeGateway, 'check').mockResolvedValue(true)
+
+    configurePlayerRuntime('performance')
+    const performanceEngine = new FakeEngine()
+    const performanceSession = new FakeMediaSession()
+    const performanceUseStore = createPlayerStore(
+      () => performanceEngine,
+      undefined,
+      undefined,
+      'player',
+      () => performanceSession,
+    )
+    const performancePinia = createPinia()
+    setActivePinia(performancePinia)
+    const performanceStore = performanceUseStore(performancePinia)
+    await performanceStore.load(track(1), { kind: 'remote', url: 'https://a/1' }, false)
+    await vi.waitFor(() => expect(performanceStore.liked).toBe(false))
+    expect(nativeCheck).not.toHaveBeenCalled()
+    performanceStore.dispose()
+
+    configurePlayerRuntime('normal')
+    const normalEngine = new FakeEngine()
+    const normalSession = new FakeMediaSession()
+    const normalUseStore = createPlayerStore(
+      () => normalEngine,
+      undefined,
+      undefined,
+      'player',
+      () => normalSession,
+    )
+    const normalPinia = createPinia()
+    setActivePinia(normalPinia)
+    const normalStore = normalUseStore(normalPinia)
+    await normalStore.load(track(2), { kind: 'remote', url: 'https://a/2' }, false)
+    await vi.waitFor(() => expect(normalStore.liked).toBe(true))
+    expect(nativeCheck).toHaveBeenCalledWith(2, expect.any(AbortSignal))
+    normalStore.dispose()
+  })
+
+  it('performance default playback preserves the exact fixture source provenance', async () => {
+    const audioUrl = 'http://127.0.0.1:43123/tone-long-mp3.mp3'
+    configurePlayerRuntime({
+      mode: 'performance',
+      audioFixture: { url: audioUrl, mimeType: 'audio/mpeg', sizeBytes: 4096 },
+    })
+    const engine = new FakeEngine()
+    const mediaSession = new FakeMediaSession()
+    const useStore = createPlayerStore(
+      () => engine,
+      undefined,
+      undefined,
+      'performance-provenance-player',
+      () => mediaSession,
+    )
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const player = useStore(pinia)
+    player.setQueue([track(999_000)], 0, 'performance-fixture')
+
+    await expect(player.playQueueIndex(0)).resolves.toBe(true)
+    expect(player.sourceKind).toBe('remote')
+    expect(player.sourceUrl).toBe(audioUrl)
+    expect(player.sourceProvenance).toBe('performance-fixture')
+    expect(engine.load).toHaveBeenCalledWith(
+      { kind: 'remote', url: audioUrl, provenance: 'performance-fixture' },
+      expect.any(AbortSignal),
+    )
+    player.dispose()
   })
 })

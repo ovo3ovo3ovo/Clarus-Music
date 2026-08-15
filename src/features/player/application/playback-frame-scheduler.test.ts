@@ -15,10 +15,10 @@ describe('playback frame scheduler', () => {
     const scheduler = createPlaybackFrameScheduler({ requestFrame, cancelFrame, readTime })
     const events: string[] = []
 
-    scheduler.subscribe(({ currentTime, timestamp }) => {
+    scheduler.subscribe((timestamp, currentTime) => {
       events.push(`progress:${currentTime}:${timestamp}`)
     })
-    scheduler.subscribe(({ currentTime, timestamp }) => {
+    scheduler.subscribe((timestamp, currentTime) => {
       events.push(`lyrics:${currentTime}:${timestamp}`)
     })
 
@@ -70,7 +70,7 @@ describe('playback frame scheduler', () => {
     scheduler.wake()
     nextFrame?.(200)
     expect(listener).toHaveBeenCalledOnce()
-    expect(listener).toHaveBeenCalledWith({ currentTime: Number.NaN, timestamp: 200 })
+    expect(listener).toHaveBeenCalledWith(200, Number.NaN)
   })
 
   it('does not let an older clock release a newer clock', () => {
@@ -90,7 +90,7 @@ describe('playback frame scheduler', () => {
     releaseFirst()
     nextFrame?.(100)
 
-    expect(listener).toHaveBeenCalledWith({ currentTime: 20, timestamp: 100 })
+    expect(listener).toHaveBeenCalledWith(100, 20)
     releaseSecond()
   })
 
@@ -109,7 +109,7 @@ describe('playback frame scheduler', () => {
     releaseSecond()
     nextFrame?.(100)
 
-    expect(listener).toHaveBeenCalledWith({ currentTime: 10, timestamp: 100 })
+    expect(listener).toHaveBeenCalledWith(100, 10)
     releaseFirst()
   })
 
@@ -128,7 +128,7 @@ describe('playback frame scheduler', () => {
     const releaseClock = scheduler.setClock(null)
     nextFrame?.(100)
 
-    expect(listener).toHaveBeenCalledWith({ currentTime: Number.NaN, timestamp: 100 })
+    expect(listener).toHaveBeenCalledWith(100, Number.NaN)
     releaseClock()
   })
 
@@ -151,8 +151,8 @@ describe('playback frame scheduler', () => {
 
     expect(firstClock).toHaveBeenCalledOnce()
     expect(secondClock).toHaveBeenCalledOnce()
-    expect(firstListener).toHaveBeenCalledWith({ currentTime: 10, timestamp: 100 })
-    expect(secondListener).toHaveBeenCalledWith({ currentTime: 20, timestamp: 100 })
+    expect(firstListener).toHaveBeenCalledWith(100, 10)
+    expect(secondListener).toHaveBeenCalledWith(100, 20)
   })
 
   it('shares one clock sample between subscribers bound to the same owner', () => {
@@ -172,7 +172,49 @@ describe('playback frame scheduler', () => {
     nextFrame?.(100)
 
     expect(clock).toHaveBeenCalledOnce()
-    expect(firstListener).toHaveBeenCalledWith({ currentTime: 42, timestamp: 100 })
-    expect(secondListener).toHaveBeenCalledWith({ currentTime: 42, timestamp: 100 })
+    expect(firstListener).toHaveBeenCalledWith(100, 42)
+    expect(secondListener).toHaveBeenCalledWith(100, 42)
+  })
+
+  it('reuses one frame callback across display frames', () => {
+    const frames: FrameRequestCallback[] = []
+    const scheduler = createPlaybackFrameScheduler({
+      requestFrame: (callback) => {
+        frames.push(callback)
+        return frames.length
+      },
+    })
+    const listener = vi.fn()
+    scheduler.subscribe(listener)
+
+    frames[0]?.(100)
+
+    expect(frames).toHaveLength(2)
+    expect(frames[1]).toBe(frames[0])
+    expect(listener).toHaveBeenCalledWith(100, Number.NaN)
+  })
+
+  it('defers a subscriber added during a frame until the following frame', () => {
+    let nextFrame: FrameRequestCallback | undefined
+    const scheduler = createPlaybackFrameScheduler({
+      requestFrame: (callback) => {
+        nextFrame = callback
+        return 1
+      },
+    })
+    const addedDuringFrame = vi.fn()
+    let added = false
+    scheduler.subscribe(() => {
+      if (added) return
+      added = true
+      scheduler.subscribe(addedDuringFrame)
+    })
+    scheduler.subscribe(vi.fn())
+
+    nextFrame?.(100)
+    expect(addedDuringFrame).not.toHaveBeenCalled()
+
+    nextFrame?.(200)
+    expect(addedDuringFrame).toHaveBeenCalledWith(200, Number.NaN)
   })
 })

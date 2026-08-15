@@ -16,6 +16,10 @@ src-tauri/target
 /target
 *.dmg
 *.local
+.env
+.env.*
+!.env.example
+!.env.*.example
 /artifacts/perf/
 
 # Editor directories and files

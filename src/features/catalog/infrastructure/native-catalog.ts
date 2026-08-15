@@ -9,6 +9,10 @@ import {
 import type { AlbumSummary, Artist, Track } from '@/types/music'
 import { desktop } from '@/platform/desktop'
 import {
+  validatePerformanceAudioFixture,
+  type PerformanceAudioFixture,
+} from '@/performance/runtime-config'
+import {
   cancellableInvoke,
   integerField as numberField,
   isRecord,
@@ -262,6 +266,42 @@ interface ResolvedRemoteStream {
   readonly cacheRequest: Omit<CacheStoreRequest, 'trackId' | 'quality'>
 }
 
+export type CatalogRuntimeConfig =
+  | Readonly<{ mode: 'normal' }>
+  | Readonly<{ mode: 'performance'; audioFixture: PerformanceAudioFixture }>
+
+let catalogRuntimeConfig: CatalogRuntimeConfig = { mode: 'normal' }
+
+/** Select the stream boundary before any mounted view creates a catalog gateway. */
+export function configureCatalogRuntime(config: CatalogRuntimeConfig): void
+export function configureCatalogRuntime(mode: 'normal'): void
+export function configureCatalogRuntime(
+  mode: 'performance',
+  audioFixture: PerformanceAudioFixture,
+): void
+export function configureCatalogRuntime(
+  configOrMode: CatalogRuntimeConfig | 'normal' | 'performance',
+  audioFixture?: PerformanceAudioFixture,
+): void {
+  let config: CatalogRuntimeConfig
+  if (typeof configOrMode === 'string') {
+    if (configOrMode === 'normal') config = { mode: 'normal' }
+    else {
+      if (audioFixture === undefined) {
+        throw new Error('Performance catalog runtime requires an audio fixture')
+      }
+      config = { mode: 'performance', audioFixture }
+    }
+  } else {
+    config = configOrMode
+  }
+  catalogRuntimeConfig =
+    config.mode === 'performance'
+      ? { mode: 'performance', audioFixture: validatePerformanceAudioFixture(config.audioFixture) }
+      : config
+  nativeAudioCacheGateway.configureRuntime(config.mode)
+}
+
 // WKWebView's HTML media backend can report the requested currentTime after a
 // FLAC seek while resuming the decoder from a different sample position.  The
 // lyrics clock then looks correct numerically but no longer matches the audio
@@ -294,17 +334,20 @@ export class NativeCatalogGateway implements CatalogGateway {
   private readonly createRequestId: () => string
   private readonly isDesktop: boolean
   private readonly audioCache: AudioCacheGateway
+  private readonly explicitRuntimeConfig: CatalogRuntimeConfig | null
 
   constructor(
     invokeCommand: InvokeCommand = invoke,
     createRequestId: () => string = () => crypto.randomUUID(),
     isDesktop = desktop.isDesktop,
     audioCache: AudioCacheGateway = nativeAudioCacheGateway,
+    runtimeConfig?: CatalogRuntimeConfig,
   ) {
     this.invokeCommand = invokeCommand
     this.createRequestId = createRequestId
     this.isDesktop = isDesktop
     this.audioCache = audioCache
+    this.explicitRuntimeConfig = runtimeConfig ?? null
   }
 
   async searchOverview(keywords: string, signal?: AbortSignal): Promise<SearchOverview> {
@@ -331,6 +374,24 @@ export class NativeCatalogGateway implements CatalogGateway {
     quality: MusicQuality,
     signal?: AbortSignal,
   ): Promise<AudioSource> {
+    const runtimeConfig = this.explicitRuntimeConfig ?? catalogRuntimeConfig
+    if (runtimeConfig.mode === 'performance') {
+      const performanceAudioFixture = validatePerformanceAudioFixture(runtimeConfig.audioFixture)
+      if (signal?.aborted) {
+        throw new DOMException(
+          String(signal.reason ?? 'Audio fixture request aborted'),
+          'AbortError',
+        )
+      }
+      // This direct loopback source deliberately bypasses both cache lookup
+      // and cache preparation. HtmlAudioEngine keeps it on the browser's
+      // native media path, where the fixture server can prove Range playback.
+      return {
+        kind: 'remote',
+        url: performanceAudioFixture.url,
+        provenance: 'performance-fixture',
+      }
+    }
     const playbackQuality = seekSafePlaybackQuality(quality)
     let cached: AudioSource | null = null
     try {

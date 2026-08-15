@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   NativeCatalogGateway,
+  configureCatalogRuntime,
   mapNativeSearchOverview,
   mapNativeSearchPage,
 } from './native-catalog'
@@ -101,6 +102,8 @@ function nativeOverview() {
 }
 
 describe('NativeCatalogGateway', () => {
+  afterEach(() => configureCatalogRuntime({ mode: 'normal' }))
+
   it('maps the narrow native search contract', () => {
     const overview = mapNativeSearchOverview(nativeOverview())
 
@@ -139,7 +142,7 @@ describe('NativeCatalogGateway', () => {
     expect(audioCache.prepare).not.toHaveBeenCalled()
   })
 
-  it('prepares seek-safe MP3 bytes before the first macOS playback', async () => {
+  it('prepares a seek-safe MP3 Range stream before the first macOS playback', async () => {
     const invokeCommand = vi.fn(async () => ({
       url: 'https://audio.test/song.mp3',
       mimeType: 'audio/mpeg',
@@ -149,9 +152,10 @@ describe('NativeCatalogGateway', () => {
       level: 'exhigh',
     })) as unknown as ConstructorParameters<typeof NativeCatalogGateway>[0]
     const prepared = {
-      kind: 'bytes' as const,
-      bytes: new Uint8Array([1, 2, 3]).buffer,
+      kind: 'managed-url' as const,
+      url: 'http://127.0.0.1:43123/v1/audio/audio-cache-1?token=secret',
       mimeType: 'audio/mpeg',
+      release: vi.fn(),
     }
     const audioCache = cacheGateway({ prepare: vi.fn(async () => prepared) })
     const gateway = new NativeCatalogGateway(invokeCommand, () => 'stream-1', true, audioCache)
@@ -172,6 +176,46 @@ describe('NativeCatalogGateway', () => {
       },
       undefined,
     )
+  })
+
+  it('performance mode bypasses every native audio-cache operation and preserves fixture provenance', async () => {
+    const invokeCommand = vi.fn()
+    const audioCache = cacheGateway()
+    configureCatalogRuntime({
+      mode: 'performance',
+      audioFixture: {
+        url: 'http://127.0.0.1:43123/tone-long-mp3.mp3',
+        mimeType: 'audio/mpeg',
+        sizeBytes: 4096,
+      },
+    })
+    const gateway = new NativeCatalogGateway(invokeCommand, () => 'perf-1', true, audioCache)
+
+    await expect(gateway.resolveStream(999_000, '999000')).resolves.toEqual({
+      kind: 'remote',
+      url: 'http://127.0.0.1:43123/tone-long-mp3.mp3',
+      provenance: 'performance-fixture',
+    })
+    expect(invokeCommand).not.toHaveBeenCalled()
+    expect(audioCache.lookup).not.toHaveBeenCalled()
+    expect(audioCache.prepare).not.toHaveBeenCalled()
+  })
+
+  it('normal mode continues to resolve and prepare through the configured cache', async () => {
+    const invokeCommand = vi.fn(async () => ({
+      url: 'https://audio.test/song.mp3',
+      mimeType: 'audio/mpeg',
+      sizeBytes: 100,
+    })) as unknown as ConstructorParameters<typeof NativeCatalogGateway>[0]
+    const audioCache = cacheGateway()
+    const gateway = new NativeCatalogGateway(invokeCommand, () => 'normal-1', true, audioCache)
+
+    await expect(gateway.resolveStream(1, '320000')).resolves.toEqual({
+      kind: 'remote',
+      url: 'https://audio.test/song.mp3',
+    })
+    expect(audioCache.lookup).toHaveBeenCalledWith(1, '320000', undefined)
+    expect(audioCache.prepare).toHaveBeenCalledOnce()
   })
 
   it('accepts an unknown-size WebM fallback and schedules format-correct caching', async () => {

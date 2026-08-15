@@ -108,6 +108,11 @@ const routes: readonly RouteRecordRaw[] = [
     component: () => import('@/features/daily-songs/DailySongsView.vue'),
     meta: { keepAlive: true, cacheKey: 'daily-songs' },
   },
+  {
+    path: '/__perf/settle',
+    name: 'performanceSettle',
+    component: () => import('@/features/performance/PerformanceSettleView.vue'),
+  },
   { path: '/login', name: 'login', redirect: '/login/account' },
   {
     path: '/login/account',

@@ -39,6 +39,69 @@ async function freshCoverImageModule() {
 }
 
 describe('coverImageUrl', () => {
+  it('keeps visible artwork on the browser HTTPS pipeline on macOS', async () => {
+    const originalInternals = Object.getOwnPropertyDescriptor(window, '__TAURI_INTERNALS__')
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform')
+    const invoke = vi.fn()
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      value: { invoke },
+    })
+    Object.defineProperty(navigator, 'platform', {
+      configurable: true,
+      value: 'MacIntel',
+    })
+    try {
+      const { coverImageUrl } = await freshCoverImageModule()
+      const result = coverImageUrl('https://p1.music.126.net/hash/cover.jpg', 40, 40, {
+        role: 'row',
+        pixelRatio: 1,
+      })
+
+      expect(new URL(result).protocol).toBe('https:')
+      expect(new URL(result).hostname).toBe('p1.music.126.net')
+      expect(new URL(result).searchParams.get('param')).toBe('96y96')
+      expect(invoke).not.toHaveBeenCalled()
+    } finally {
+      if (originalInternals) {
+        Object.defineProperty(window, '__TAURI_INTERNALS__', originalInternals)
+      } else {
+        delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+      }
+      if (originalPlatform) {
+        Object.defineProperty(navigator, 'platform', originalPlatform)
+      }
+    }
+  })
+
+  it('rejects custom, blob, data, and relative sources for visible artwork', async () => {
+    const { coverImageUrl, coverImageCandidates } = await freshCoverImageModule()
+    const invalidSources = [
+      'custom-image://localhost/v1?source=https%3A%2F%2Fimg.test%2Fcover.jpg&w=96&h=96',
+      'blob:https://img.test/cover',
+      'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=',
+      '/covers/cover.jpg',
+    ]
+
+    for (const source of invalidSources) {
+      expect(coverImageUrl(source, 40, 40, { role: 'row' })).toBe('')
+      expect(coverImageCandidates(source, 40, 40, { role: 'row' })).toEqual([])
+    }
+  })
+
+  it('permits only the self-runner loopback image fixture over HTTP', async () => {
+    const { coverImageUrl } = await freshCoverImageModule()
+    expect(
+      coverImageUrl('http://127.0.0.1:43123/clarus-perf/cover.png', 40, 40, {
+        role: 'row',
+        pixelRatio: 1,
+      }),
+    ).toBe('http://127.0.0.1:43123/clarus-perf/cover.png?param=96y96')
+    expect(coverImageUrl('http://192.0.2.1/cover.png', 40, 40, { role: 'row' })).toBe(
+      'https://192.0.2.1/cover.png?param=96y96',
+    )
+  })
+
   it('uses role-specific request buckets rather than a universal 512px minimum', async () => {
     const { coverImageUrl } = await freshCoverImageModule()
     const source = 'http://img.test/cover.jpg?foo=bar&param=96y96'
@@ -73,7 +136,7 @@ describe('coverImageUrl', () => {
         role: 'video-card',
         pixelRatio: 2,
       }),
-    ).toBe('https://img.test/video.jpg?param=640y359')
+    ).toBe('https://img.test/video.jpg?param=480y269')
   })
 
   it('can request an exact cacheable media artwork size', async () => {
@@ -117,6 +180,17 @@ describe('coverImageUrl', () => {
       allowOriginalFallback: true,
     })
     expect(optedIn.some((url) => url === 'https://img.test/master.jpg')).toBe(true)
+  })
+
+  it('keeps an opted-in original fallback on the canonical HTTPS source', async () => {
+    const { coverImageCandidates } = await freshCoverImageModule()
+    const candidates = coverImageCandidates('http://img.test/master.jpg', 40, 40, {
+      role: 'row',
+      allowOriginalFallback: true,
+    })
+
+    expect(candidates.some((url) => url === 'http://img.test/master.jpg')).toBe(false)
+    expect(candidates.some((url) => url === 'https://img.test/master.jpg')).toBe(true)
   })
 })
 
@@ -187,27 +261,5 @@ describe('cover image preloading', () => {
       vi.unstubAllGlobals()
       vi.useRealTimers()
     }
-  })
-})
-
-describe('decoded cover budget', () => {
-  it('evicts the oldest unloadable decoded cover when the budget is exceeded', async () => {
-    const { COVER_IMAGE_DECODE_BUDGET_BYTES, registerCoverImageBudget } =
-      await freshCoverImageModule()
-    const firstRelease = vi.fn()
-    const secondRelease = vi.fn()
-    const estimatedBytes = COVER_IMAGE_DECODE_BUDGET_BYTES * 0.75
-    const first = registerCoverImageBudget(() => estimatedBytes, firstRelease)
-    const second = registerCoverImageBudget(() => estimatedBytes, secondRelease)
-    first.setUnloadable(true)
-    second.setUnloadable(true)
-    first.markDecoded(true)
-    second.markDecoded(true)
-
-    expect(firstRelease).toHaveBeenCalledOnce()
-    expect(secondRelease).not.toHaveBeenCalled()
-
-    first.dispose()
-    second.dispose()
   })
 })

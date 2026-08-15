@@ -13,7 +13,7 @@ pub use error::CoreError;
 pub use models::{
     Album, Artist, AuthSession, AuthUser, DailySongs, LyricLine, PlaylistDetail, PlaylistPage,
     PlaylistScope, PlaylistSummary, PlaylistTrackPage, QrLogin, QrLoginCheck, QrLoginStatus,
-    StreamSource, Track, TrackLyrics,
+    SmsLogin, StreamSource, Track, TrackLyrics,
 };
 pub use parse::{
     parse_lrc, DAILY_SONG_LIMIT, MAX_LINE_CHARS, MAX_LYRIC_BYTES, MAX_LYRIC_LINES,
